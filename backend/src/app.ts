@@ -7,11 +7,12 @@ import cookieParser from 'cookie-parser';
 import { rateLimit } from 'express-rate-limit';
 import { logger } from './utils/logger';
 import healthRouter from './health/health.routes';
-import { ApiResponse } from '@shared/types';
+import { ApiResponse } from './types';
 import { configurePassport } from './services/passport';
 import authRouter from './routes/auth';
 import { authRateLimiter, registerRateLimiter, securityHeaders } from './middleware/security';
 import { initEmailService } from './services/emailService';
+import { requestLogger, errorLogger } from './middleware/requestLogger';
 
 // Configure rate limiting
 const apiLimiter = rateLimit({
@@ -45,6 +46,9 @@ const createApp = async (): Promise<Application> => {
   if (process.env.HELMET_ENABLED === 'true') {
     app.use(helmet());
   }
+
+  // Request logging
+  app.use(requestLogger);
 
   // CORS configuration
   const corsOptions = {
@@ -142,19 +146,48 @@ const createApp = async (): Promise<Application> => {
     // process.exit(1);
   });
 
-  // Global error handler
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    // Log the error with request details
-    logger.error('Unhandled error', { 
-      error: err.message, 
-      stack: err.stack,
-      name: err.name,
-      code: err.code,
-      status: err.status,
-      statusCode: err.statusCode,
+  // Error logging middleware
+  app.use(errorLogger);
+
+  // Error handling middleware
+  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    // If headers were already sent, delegate to the default Express error handler
+    if (res.headersSent) {
+      return next(err);
+    }
+
+    // Log the error with request context
+    logger.error('Error handler caught:', {
+      message: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+      path: req.path,
+      method: req.method,
+      params: req.params,
+      query: req.query,
+      body: req.body,
     });
-    
-    // Handle JWT errors
+
+    // Format the error response
+    const statusCode = (err as any).statusCode || 500;
+    const errorResponse: ApiResponse<null> = {
+      success: false,
+      error: {
+        code: (err as any).code || 'INTERNAL_SERVER_ERROR',
+        message: statusCode >= 500 ? 'An unexpected error occurred' : err.message,
+        details: process.env.NODE_ENV === 'development' ? {
+          stack: err.stack,
+          ...(err as any).details,
+        } : undefined,
+      },
+      data: null,
+      timestamp: new Date().toISOString(),
+    };
+
+    res.status(statusCode).json(errorResponse);
+  });
+
+  // Handle JWT errors
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,
