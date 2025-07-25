@@ -1,0 +1,34 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["jest", "node", "@types/jest"],
+    "esModuleInterop": true,
+    "isolatedModules": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "../node_modules/@types",
+      "../src/types"
+    ],
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["src/*"],
+      "@shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "setup.ts",
+    "**/__mocks__/*.ts",
+    "**/test-utils.ts",
+    "../src/**/*.ts",
+    "../src/**/*.d.ts"
+  ],
+  "exclude": ["node_modules"]
+}

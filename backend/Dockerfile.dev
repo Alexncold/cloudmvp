@@ -1,0 +1,25 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Instalar dependencias del sistema
+RUN apk add --no-cache \
+    ffmpeg \
+    python3 \
+    make \
+    g++
+
+# Copiar archivos de dependencias
+COPY package*.json ./
+
+# Instalar dependencias
+RUN npm ci
+
+# Copiar el resto de los archivos
+COPY . .
+
+# Exponer puerto
+EXPOSE 3001
+
+# Comando de desarrollo
+CMD ["npm", "run", "dev"]
