@@ -1,39 +1,21 @@
-// Configuración de pruebas
+// Test configuration
 import dotenv from 'dotenv';
 import path from 'path';
 import { jest } from '@jest/globals';
 import type { Config } from '@jest/types';
-import { createServer } from 'http';
-import createApp from '../src/app';
-import { Server } from 'http';
+import { createServer, Server } from 'http';
 import { AddressInfo } from 'net';
+import { PoolClient, QueryResult } from 'pg';
+import createApp from '../src/app';
 import { logger } from '../src/utils/logger';
 import { __mockDb, __mockQuery, __mockConnect, __mockClose } from '../__mocks__/database';
+import { db as mockDb } from './__mocks__/db';
 
-// Reset all mocks before each test
-beforeEach(() => {
-  jest.clearAllMocks();
-  
-  // Reset the mock database state
-  __mockQuery.mockImplementation((query: string, params?: any[]) => {
-    // Default response for queries
-    return Promise.resolve({
-      rows: [],
-      rowCount: 0,
-      command: '',
-      oid: 0,
-      fields: [],
-    });
-  });
-  
-  // Set up default mock for connect
-  __mockConnect.mockResolvedValue({
-    query: __mockQuery,
-    release: jest.fn(),
-  });
-});
+// Type definitions for mock functions
+type MockQueryFunction = (query: string, params?: unknown[]) => Promise<QueryResult>;
+type MockConnectFunction = () => Promise<PoolClient>;
 
-// Extender el tipo global para incluir testRequest
+// Global type extensions
 declare global {
   // eslint-disable-next-line no-var
   var testRequest: import('supertest').SuperTest<import('supertest').Test>;
@@ -43,42 +25,100 @@ declare global {
   var __TEST_SERVER__: Server;
 }
 
-// Inicializar contador para tests
+// Initialize global counter
 global.__COUNTER__ = 0;
 
-// Cargar variables de entorno de prueba
+// Load test environment variables
 const envPath = path.resolve(__dirname, '../.env.test');
-dotenv.config({ path: envPath, override: true });
+const envResult = dotenv.config({ path: envPath, override: true });
 
+if (envResult.error) {
+  logger.warn('No .env.test file found, using default test environment');
+}
 
+// Validate required environment variables
+const requiredEnvVars = [
+  'NODE_ENV',
+  'DATABASE_URL',
+  'JWT_SECRET',
+  'JWT_EXPIRES_IN'
+];
 
-// Global test configuration
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  logger.warn(`Missing required environment variables: ${missingVars.join(', ')}`);
+}
+
+// Configure test environment
+process.env.NODE_ENV = 'test';
+process.env.PORT = process.env.PORT || '3002';
+
+// Configure global console mocks
 global.console = {
   ...console,
-  // Sobrescribir console.log para evitar ruido en las pruebas
   log: jest.fn(),
   info: jest.fn(),
-  // Mantener console.error para ver errores
   error: jest.fn(console.error),
   warn: jest.fn(console.warn),
   debug: jest.fn(console.debug),
 };
 
-// Configurar el entorno de prueba
-process.env.NODE_ENV = 'test';
-process.env.PORT = '3002'; // Usar un puerto diferente para pruebas
+// Global test setup
+beforeAll(async () => {
+  // Initialize test server if needed
+  if (process.env.TEST_TYPE === 'integration') {
+    const app = await createApp();
+    const server = createServer(app);
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const { port } = server.address() as AddressInfo;
+        process.env.TEST_SERVER_URL = `http://localhost:${port}`;
+        global.__TEST_SERVER__ = server;
+        resolve();
+      });
+    });
+  }
+});
 
-// Import the mock database service for integration tests
-import { db as mockDb } from './__mocks__/db';
+// Global test teardown
+afterAll(async () => {
+  if (global.__TEST_SERVER__) {
+    await new Promise<void>((resolve) => {
+      global.__TEST_SERVER__.close(() => resolve());
+    });
+  }
+});
 
-// Configure the mock database for testing
+// Reset all mocks and database state before each test
 beforeEach(() => {
-  // Clear all mocks before each test
   jest.clearAllMocks();
   
-  // Only configure integration test mocks if we're running integration tests
+    // Reset the mock database state with proper typing
+  const mockQueryImplementation: MockQueryFunction = (query, params = []) => {
+    return Promise.resolve({
+      rows: [],
+      rowCount: 0,
+      command: '',
+      oid: 0,
+      fields: [],
+    });
+  };
+
+  // Create a mock client with proper typing
+  const mockClient = {
+    query: mockQueryImplementation,
+    release: jest.fn().mockImplementation(() => Promise.resolve()),
+  };
+  
+  // Clear and set up the mocks with proper typing
+  (__mockQuery as jest.MockedFunction<MockQueryFunction>).mockClear();
+  (__mockQuery as jest.MockedFunction<MockQueryFunction>).mockImplementation(mockQueryImplementation);
+  
+  (__mockConnect as jest.MockedFunction<MockConnectFunction>).mockClear();
+  (__mockConnect as jest.MockedFunction<MockConnectFunction>).mockResolvedValue(mockClient as unknown as PoolClient);
+  
+  // Configure integration test mocks if needed
   if (process.env.TEST_TYPE === 'integration') {
-    // Clear mock database
     mockDb.clearMocks();
     
     // Set up default mock responses for common queries
