@@ -1,4 +1,4 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { logger } from '../utils/logger';
 
 export interface DatabaseConfig extends PoolConfig {
@@ -48,7 +48,7 @@ class Database {
     }
   }
 
-  public async query<T = any>(text: string, params?: any[]): Promise<{ rows: T[]; rowCount: number }> {
+  public async query<T extends QueryResultRow = any>(text: string, params?: any[]): Promise<QueryResult<T>> {
     try {
       const start = Date.now();
       const res = await this.pool.query(text, params);

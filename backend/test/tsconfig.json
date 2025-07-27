@@ -1,17 +1,15 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "types": ["jest", "node", "@types/jest"],
     "esModuleInterop": true,
     "isolatedModules": false,
     "skipLibCheck": true,
     "strict": true,
     "moduleResolution": "node",
     "resolveJsonModule": true,
+    "types": ["node", "jest"],
     "typeRoots": [
-      "./node_modules/@types",
-      "../node_modules/@types",
-      "../src/types"
+      "../node_modules/@types"
     ],
     "baseUrl": "..",
     "paths": {

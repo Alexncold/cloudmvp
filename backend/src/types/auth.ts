@@ -1,4 +1,19 @@
-import { User as PrismaUser } from '@prisma/client';
+// Base user interface that matches our database schema
+export interface BaseUser {
+  id: string;
+  email: string;
+  name: string;
+  password_hash: string;
+  is_verified: boolean;
+  verification_token?: string | null;
+  verification_token_expires?: Date | null;
+  reset_password_token?: string | null;
+  reset_password_expires?: Date | null;
+  refresh_token_hash?: string | null;
+  created_at: Date;
+  updated_at: Date;
+  role?: string;
+}
 
 export interface TokenPair {
   accessToken: string;
@@ -11,11 +26,13 @@ export interface TokenPayload {
   type: 'access' | 'refresh' | 'email-verification' | 'password-reset';
   iat?: number;
   exp?: number;
+  role?: string;
 }
 
-export interface LocalUser extends Omit<PrismaUser, 'password_hash' | 'refresh_token_hash'> {
+export interface LocalUser extends Omit<BaseUser, 'password_hash' | 'refresh_token_hash'> {
   password_hash?: string;
   refresh_token_hash?: string | null;
+  role?: string;
 }
 
 export interface AuthResponse {

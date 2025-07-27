@@ -7,6 +7,31 @@ import { createServer } from 'http';
 import createApp from '../src/app';
 import { Server } from 'http';
 import { AddressInfo } from 'net';
+import { logger } from '../src/utils/logger';
+import { __mockDb, __mockQuery, __mockConnect, __mockClose } from '../__mocks__/database';
+
+// Reset all mocks before each test
+beforeEach(() => {
+  jest.clearAllMocks();
+  
+  // Reset the mock database state
+  __mockQuery.mockImplementation((query: string, params?: any[]) => {
+    // Default response for queries
+    return Promise.resolve({
+      rows: [],
+      rowCount: 0,
+      command: '',
+      oid: 0,
+      fields: [],
+    });
+  });
+  
+  // Set up default mock for connect
+  __mockConnect.mockResolvedValue({
+    query: __mockQuery,
+    release: jest.fn(),
+  });
+});
 
 // Extender el tipo global para incluir testRequest
 declare global {
@@ -25,7 +50,9 @@ global.__COUNTER__ = 0;
 const envPath = path.resolve(__dirname, '../.env.test');
 dotenv.config({ path: envPath, override: true });
 
-// Configuración global para las pruebas
+
+
+// Global test configuration
 global.console = {
   ...console,
   // Sobrescribir console.log para evitar ruido en las pruebas

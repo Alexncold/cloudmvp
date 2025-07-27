@@ -1,21 +1,25 @@
 import { Request, Response } from 'express';
 import { IncomingHttpHeaders } from 'http';
-import { createAuthController } from '../../../src/controllers/authController';
+import createAuthController from '../../../src/controllers/authController';
 import { DatabaseService } from '../../../src/services/db';
 
 // Mock the DatabaseService
 jest.mock('../../../src/services/db');
+const mockDbService = {
+  getClient: jest.fn(),
+  query: jest.fn()
+} as unknown as DatabaseService;
 
-// Create a mock DatabaseService
-const mockDbService = new DatabaseService();
-const { 
-  register, 
-  login, 
+// Create an instance of AuthController using the factory function
+const authController = createAuthController();
+const {
+  login,
+  register,
   verifyEmail,
   refreshToken,
   logout,
   getCurrentUser
-} = createAuthController(mockDbService);
+} = authController;
 
 // Create a custom mock response type that matches our implementation
 type MockResponse = Response & {
@@ -139,7 +143,8 @@ describe('Auth Controller', () => {
         .mockResolvedValue({ rows: [], rowCount: 0 }); // Any subsequent queries
 
       // Call the register function
-      await register(req as Request, res as unknown as Response);
+      const next = jest.fn();
+      await register(req as Request, res as unknown as Response, next);
 
       // Assertions
       expect(res.status).toHaveBeenCalledWith(201);
@@ -190,7 +195,8 @@ describe('Auth Controller', () => {
       });
 
       // Call the register function
-      await register(req as Request, res as unknown as Response);
+      const next = jest.fn();
+      await register(req as Request, res as unknown as Response, next);
 
       // Assertions
       expect(res.status).toHaveBeenCalledWith(400);
@@ -285,7 +291,8 @@ describe('Auth Controller', () => {
       });
 
       // Call the login function
-      await login(req as Request, res as unknown as Response);
+      const next = jest.fn();
+      await login(req as Request, res as unknown as Response, next);
       
       // Verify the response status was called with 200
       expect(res.status).toHaveBeenCalledWith(200);
@@ -351,7 +358,8 @@ describe('Auth Controller', () => {
       bcrypt.compare.mockResolvedValueOnce(false);
 
       // Call the login function
-      await login(req as Request, res as unknown as Response);
+      const next = jest.fn();
+      await login(req as Request, res as unknown as Response, next);
 
       // Assertions for invalid credentials
       expect(res.status).toHaveBeenCalledWith(401);

@@ -1,6 +1,6 @@
 import request from 'supertest';
 import app from '../src/app';
-import { createAuthController } from '../src/controllers/authController';
+import AuthController from '../src/controllers/authController';
 import { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 
