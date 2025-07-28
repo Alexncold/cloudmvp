@@ -1,25 +1,26 @@
 import axios, { AxiosError } from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../src/utils/logger';
+import { setupTestDatabase, teardownTestDatabase, createTestUser, generateTestToken } from '../utils/testUtils';
 
-// Configuración
+// Configuration
 const API_BASE_URL = process.env.API_URL || 'http://localhost:3001';
 const TEST_EMAIL = `test-${uuidv4().substring(0, 8)}@test.com`;
 const TEST_PASSWORD = 'TestPassword123!';
 const TEST_NAME = 'Test User';
 
-// Variables para almacenar tokens
+// Variables to store tokens and test data
 let accessToken = '';
 let refreshToken = '';
-let verificationToken = '';
+let testUserId = '';
 
-// Cliente HTTP configurado
+// Configured HTTP client
 const api = axios.create({
-  baseURL: API_BASE_URL,
-  validateStatus: (status) => status < 500, // No lanzar error para códigos 4xx
+  baseURL: `${API_BASE_URL}/api`,
+  validateStatus: (status) => status < 500, // Don't throw for 4xx errors
 });
 
-// Interceptor para logging
+// Request interceptor for logging
 api.interceptors.request.use((config) => {
   logger.debug(`[TEST] ${config.method?.toUpperCase()} ${config.url}`);
   if (config.data) {
@@ -28,26 +29,180 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Función auxiliar para esperar
+// Response interceptor for logging
+api.interceptors.response.use(
+  (response) => {
+    logger.debug(`[TEST] Response ${response.status}:`, JSON.stringify(response.data, null, 2));
+    return response;
+  },
+  (error) => {
+    logger.error('[TEST] Error:', error.message);
+    return Promise.reject(error);
+  }
+);
+
+// Helper function to wait
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Set auth header for authenticated requests
+const setAuthHeader = (token: string) => {
+  api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+};
+
+// Clear auth header
+const clearAuthHeader = () => {
+  delete api.defaults.headers.common['Authorization'];
+};
+
 describe('Authentication System', () => {
-  // Test 1: Registro de usuario
+  // Setup and teardown
+  beforeAll(async () => {
+    await setupTestDatabase();
+  });
+
+  afterAll(async () => {
+    await teardownTestDatabase();
+  });
+
+  afterEach(() => {
+    // Clear auth header after each test
+    clearAuthHeader();
+  });
+
+  // Test 1: User Registration
   test('should register a new user', async () => {
-    const response = await api.post('/api/auth/register', {
+    const response = await api.post('/auth/register', {
       email: TEST_EMAIL,
       password: TEST_PASSWORD,
       name: TEST_NAME,
     });
 
     expect(response.status).toBe(201);
-    expect(response.data).toHaveProperty('message', 'User registered successfully. Please check your email to verify your account.');
+    expect(response.data).toHaveProperty('success', true);
+    expect(response.data).toHaveProperty('message', 'User registered successfully');
     expect(response.data).toHaveProperty('user.email', TEST_EMAIL);
     expect(response.data.user).not.toHaveProperty('password');
     
-    // En un entorno real, aquí extraeríamos el token de verificación del correo
-    // Para esta prueba, simulamos que lo tenemos
-    verificationToken = 'simulated-verification-token';
+    // Save user ID for future tests
+    testUserId = response.data.user.id;
+  });
+
+  // Test 2: Login with registered user
+  test('should login with valid credentials', async () => {
+    const response = await api.post('/auth/login', {
+      email: TEST_EMAIL,
+      password: TEST_PASSWORD,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('success', true);
+    expect(response.data).toHaveProperty('accessToken');
+    expect(response.data).toHaveProperty('refreshToken');
+    expect(response.data).toHaveProperty('user');
+    
+    // Save tokens for future tests
+    accessToken = response.data.accessToken;
+    refreshToken = response.data.refreshToken;
+    
+    // Set auth header for subsequent requests
+    setAuthHeader(accessToken);
+  });
+
+  // Test 3: Get current user profile
+  test('should get current user profile', async () => {
+    const response = await api.get('/auth/me');
+    
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('success', true);
+    expect(response.data).toHaveProperty('user.email', TEST_EMAIL);
+    expect(response.data.user).not.toHaveProperty('password');
+  });
+
+  // Test 4: Refresh access token
+  test('should refresh access token with valid refresh token', async () => {
+    const response = await api.post('/auth/refresh-token', {
+      refreshToken,
+    });
+    
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('success', true);
+    expect(response.data).toHaveProperty('accessToken');
+    
+    // Update access token
+    accessToken = response.data.accessToken;
+    setAuthHeader(accessToken);
+  });
+
+  // Test 5: Logout
+  test('should logout and invalidate tokens', async () => {
+    const response = await api.post('/auth/logout');
+    
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('success', true);
+    
+    // Verify token is invalidated
+    clearAuthHeader();
+    setAuthHeader(accessToken);
+    
+    const meResponse = await api.get('/auth/me');
+    expect(meResponse.status).toBe(401);
+  });
+
+  // Test 6: Google Drive integration - Get status (unauthenticated)
+  test('should not get drive status when not authenticated', async () => {
+    clearAuthHeader();
+    const response = await api.get('/auth/drive/status');
+    
+    expect(response.status).toBe(401);
+    expect(response.data).toHaveProperty('success', false);
+  });
+
+  // Test 7: Google Drive integration - Get status (authenticated)
+  test('should get drive status when authenticated', async () => {
+    // First login again
+    const loginResponse = await api.post('/auth/login', {
+      email: TEST_EMAIL,
+      password: TEST_PASSWORD,
+    });
+    
+    accessToken = loginResponse.data.accessToken;
+    setAuthHeader(accessToken);
+    
+    // Then test drive status
+    const response = await api.get('/auth/drive/status');
+    
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('connected');
+    // The actual status will depend on the test environment
+  });
+
+  // Test 8: Google Drive integration - Revoke access
+  test('should revoke drive access', async () => {
+    const response = await api.post('/auth/drive/revoke');
+    
+    expect(response.status).toBe(200);
+    expect(response.data).toHaveProperty('success', true);
+  });
+
+  // Test 9: Rate limiting
+  test('should enforce rate limiting on login attempts', async () => {
+    // Make multiple login attempts with wrong password
+    const promises = [];
+    for (let i = 0; i < 15; i++) {
+      promises.push(
+        api.post('/auth/login', {
+          email: TEST_EMAIL,
+          password: 'wrongpassword',
+        }).catch(error => error.response || error)
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    const rateLimitedResponse = responses.find(r => r.status === 429);
+    
+    expect(rateLimitedResponse).toBeDefined();
+    expect(rateLimitedResponse.data).toHaveProperty('message', 'Too many login attempts, please try again later.');
+  });
   });
 
   // Test 2: Verificación de correo electrónico
