@@ -42,7 +42,7 @@ interface GoogleStrategyOptions {
 const googleStrategyOptions: GoogleStrategyOptions = {
   clientID: process.env.GOOGLE_CLIENT_ID || 'dummy-client-id',
   clientSecret: process.env.GOOGLE_CLIENT_SECRET || 'dummy-client-secret',
-  callbackURL: `${process.env.API_URL || 'http://localhost:3002'}/api/auth/google/callback`,
+  callbackURL: `${process.env.API_URL || 'http://localhost:3001'}/api/auth/google/callback`,
   scope: ['profile', 'email', 'https://www.googleapis.com/auth/drive.file'],
   passReqToCallback: true
 };

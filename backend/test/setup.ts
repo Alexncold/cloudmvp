@@ -1,6 +1,12 @@
-// Test configuration
+// Load test environment variables first
 import dotenv from 'dotenv';
 import path from 'path';
+
+// Load test environment variables from .env.test file
+const envFilePath = path.resolve(__dirname, '../.env.test');
+dotenv.config({ path: envFilePath });
+
+// Test configuration
 import { jest } from '@jest/globals';
 import type { Config } from '@jest/types';
 import { createServer, Server } from 'http';
@@ -20,9 +26,11 @@ declare global {
   // eslint-disable-next-line no-var
   var testRequest: import('supertest').SuperTest<import('supertest').Test>;
   // eslint-disable-next-line no-var
+  var __TEST_SERVER__: import('http').Server | null;
+  // eslint-disable-next-line no-var
   var __COUNTER__: number;
   // eslint-disable-next-line no-var
-  var __TEST_SERVER__: Server;
+  var __TEST_DB_CONNECTION__: import('pg').Pool | null;
 }
 
 // Initialize global counter
@@ -51,7 +59,8 @@ if (missingVars.length > 0) {
 
 // Configure test environment
 process.env.NODE_ENV = 'test';
-process.env.PORT = process.env.PORT || '3002';
+// Usar el mismo puerto que el backend
+process.env.PORT = '3001';
 
 // Configure global console mocks
 global.console = {
@@ -82,10 +91,17 @@ beforeAll(async () => {
 
 // Global test teardown
 afterAll(async () => {
-  if (global.__TEST_SERVER__) {
-    await new Promise<void>((resolve) => {
-      global.__TEST_SERVER__.close(() => resolve());
-    });
+  // No necesitamos cerrar el servidor ya que estamos usando el existente
+  console.log('Test setup complete - using existing server');
+  
+  // Limpiar cualquier conexión de base de datos si es necesario
+  if (global.__TEST_DB_CONNECTION__) {
+    try {
+      await global.__TEST_DB_CONNECTION__.end();
+      console.log('Test database connection closed');
+    } catch (error) {
+      console.error('Error closing test database connection:', error);
+    }
   }
 });
 
@@ -144,27 +160,15 @@ beforeEach(() => {
 
 // Configuración adicional para las pruebas
 beforeAll(async () => {
-  // Iniciar el servidor antes de todas las pruebas
-  const app = await createApp();
-  global.__TEST_SERVER__ = createServer(app);
-  await new Promise<void>((resolve) => {
-    global.__TEST_SERVER__.listen(3002, '0.0.0.0', () => {
-      console.log('Test server running on port 3002');
-      resolve();
-    });
-  });
+  // Usar el backend existente en el puerto 3001
+  console.log('Using existing backend server on port 3001');
+  // No iniciamos un nuevo servidor, usamos el que ya está corriendo
+  global.__TEST_SERVER__ = null; // Marcamos que no estamos usando un servidor de prueba
 });
 
 afterAll(async () => {
-  // Cerrar el servidor después de todas las pruebas
-  if (global.__TEST_SERVER__) {
-    await new Promise<void>((resolve) => {
-      global.__TEST_SERVER__.close(() => {
-        console.log('Test server closed');
-        resolve();
-      });
-    });
-  }
+  // No necesitamos cerrar ningún servidor ya que estamos usando el existente
+  console.log('Test setup complete - using existing server');
 });
 
 beforeEach(() => {

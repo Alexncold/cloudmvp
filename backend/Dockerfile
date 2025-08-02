@@ -13,7 +13,8 @@ RUN npm ci --only=production
 
 # Copiar código fuente
 COPY src/ ./src/
-COPY shared/ ./shared/
+# Comentado temporalmente ya que compartimos este directorio como volumen en docker-compose.yml
+# COPY shared/ ./shared/
 
 # Compilar TypeScript
 RUN npm run build

@@ -120,6 +120,7 @@ export class EncryptionService {
 
   /**
    * Encrypts a file and saves it with .enc extension
+   * Optimized for small to medium files (loads entire file into memory)
    */
   public static async encryptFile(
     inputPath: string,
@@ -173,7 +174,114 @@ export class EncryptionService {
   }
 
   /**
+   * Encrypts a video file using streaming for better memory efficiency with large files
+   * @param inputPath Path to the input video file
+   * @param outputPath Optional output path (defaults to inputPath + '.enc')
+   * @param chunkSize Size of chunks to process at once (default: 10MB)
+   */
+  public static async encryptVideoFile(
+    inputPath: string,
+    outputPath?: string,
+    chunkSize: number = 10 * 1024 * 1024 // 10MB chunks
+  ): Promise<string> {
+    if (!this.ENCRYPTION_KEY) {
+      throw new Error('Encryption key not configured');
+    }
+
+    const output = outputPath || `${inputPath}.enc`;
+    const iv = crypto.randomBytes(this.IV_LENGTH);
+    const salt = crypto.randomBytes(this.SALT_LENGTH);
+    
+    try {
+      // Derive a key from the password and salt
+      const key = await this.deriveKey(this.ENCRYPTION_KEY, salt);
+      
+      // Create cipher
+      const cipher = crypto.createCipheriv(this.ALGORITHM, key, iv);
+      
+      // Create read and write streams
+      const readStream = fs.createReadStream(inputPath, { highWaterMark: chunkSize });
+      const writeStream = fs.createWriteStream(`${output}.tmp`);
+      
+      // Write header (salt + iv)
+      await new Promise((resolve, reject) => {
+        writeStream.write(salt, error => error ? reject(error) : resolve(true));
+      });
+      
+      await new Promise((resolve, reject) => {
+        writeStream.write(iv, error => error ? reject(error) : resolve(true));
+      });
+      
+      // Process file in chunks
+      let totalEncrypted = 0;
+      
+      for await (const chunk of readStream) {
+        const encryptedChunk = cipher.update(chunk);
+        await new Promise((resolve, reject) => {
+          writeStream.write(encryptedChunk, error => error ? reject(error) : resolve(true));
+        });
+        totalEncrypted += chunk.length;
+        logger.debug(`Encrypted ${totalEncrypted} bytes of video data`, { inputPath });
+      }
+      
+      // Finalize encryption
+      const finalChunk = cipher.final();
+      if (finalChunk.length > 0) {
+        await new Promise((resolve, reject) => {
+          writeStream.write(finalChunk, error => error ? reject(error) : resolve(true));
+        });
+      }
+      
+      // Write auth tag
+      const authTag = cipher.getAuthTag();
+      await new Promise((resolve, reject) => {
+        writeStream.write(authTag, error => error ? reject(error) : resolve(true));
+      });
+      
+      // Close the write stream
+      await new Promise((resolve) => writeStream.end(resolve));
+      
+      // Rename temp file to final output
+      await fs.promises.rename(`${output}.tmp`, output);
+      
+      // Optionally remove the original file
+      if (outputPath) {
+        await unlink(inputPath).catch(error => {
+          logger.warn(`Could not remove original file ${inputPath}:`, error);
+        });
+      }
+      
+      logger.info(`Successfully encrypted video file: ${inputPath} -> ${output}`, {
+        inputPath,
+        outputPath: output,
+        totalEncrypted
+      });
+      
+      return output;
+      
+    } catch (error) {
+      // Clean up any partial output on error
+      try {
+        if (await fs.promises.access(`${output}.tmp`).then(() => true).catch(() => false)) {
+          await unlink(`${output}.tmp`);
+        }
+      } catch (cleanupError) {
+        logger.error('Error during cleanup after encryption failure:', cleanupError);
+      }
+      
+      logger.error('Error encrypting video file:', { 
+        inputPath, 
+        outputPath: output,
+        error: error.message 
+      });
+      
+      throw new Error(`Failed to encrypt video file: ${error.message}`);
+    }
+  }
+
+  /**
    * Decrypts a file and saves it to the specified location
+   * Optimized for small to medium files (loads entire file into memory)
    */
   public static async decryptFile(
     inputPath: string,
@@ -215,7 +323,139 @@ export class EncryptionService {
       return outputPath;
     } catch (error) {
       logger.error('Error decrypting file:', { inputPath, outputPath, error });
-      throw new Error('Failed to decrypt file');
+      throw new Error(`Failed to decrypt file: ${error.message}`);
+    }
+  }
+
+  /**
+   * Decrypts a video file using streaming for better memory efficiency with large files
+   * @param inputPath Path to the encrypted video file
+   * @param outputPath Path to save the decrypted file
+   * @param chunkSize Size of chunks to process at once (default: 10MB)
+   */
+  public static async decryptVideoFile(
+    inputPath: string,
+    outputPath: string,
+    chunkSize: number = 10 * 1024 * 1024 // 10MB chunks
+  ): Promise<string> {
+    if (!this.ENCRYPTION_KEY) {
+      throw new Error('Encryption key not configured');
+    }
+
+    const headerSize = this.SALT_LENGTH + this.IV_LENGTH;
+    const authTagSize = 16; // GCM auth tag is always 16 bytes
+    let fileHandle: fs.promises.FileHandle | null = null;
+    let writeStream: fs.WriteStream | null = null;
+    
+    try {
+      // Open the input file
+      fileHandle = await fs.promises.open(inputPath, 'r');
+      const { size: fileSize } = await fileHandle.stat();
+      
+      if (fileSize < headerSize + authTagSize) {
+        throw new Error('File is too small to be a valid encrypted video');
+      }
+      
+      // Read salt and IV from the beginning of the file
+      const saltBuffer = Buffer.alloc(this.SALT_LENGTH);
+      const ivBuffer = Buffer.alloc(this.IV_LENGTH);
+      
+      await fileHandle.read(saltBuffer, 0, this.SALT_LENGTH, 0);
+      await fileHandle.read(ivBuffer, 0, this.IV_LENGTH, this.SALT_LENGTH);
+      
+      // Derive the key
+      const key = await this.deriveKey(this.ENCRYPTION_KEY, saltBuffer);
+      
+      // Create decipher
+      const decipher = crypto.createDecipheriv(this.ALGORITHM, key, ivBuffer);
+      
+      // Read the auth tag from the end of the file
+      const authTag = Buffer.alloc(authTagSize);
+      await fileHandle.read(authTag, 0, authTagSize, fileSize - authTagSize);
+      decipher.setAuthTag(authTag);
+      
+      // Create write stream for decrypted output
+      writeStream = fs.createWriteStream(outputPath);
+      
+      // Process file in chunks
+      let position = headerSize;
+      const encryptedDataSize = fileSize - headerSize - authTagSize;
+      let totalDecrypted = 0;
+      
+      while (position < fileSize - authTagSize) {
+        const chunkSizeToRead = Math.min(chunkSize, fileSize - authTagSize - position);
+        const chunk = Buffer.alloc(chunkSizeToRead);
+        
+        const { bytesRead } = await fileHandle.read(chunk, 0, chunkSizeToRead, position);
+        if (bytesRead === 0) break;
+        
+        const decryptedChunk = decipher.update(chunk);
+        if (decryptedChunk.length > 0) {
+          await new Promise((resolve, reject) => {
+            if (!writeStream) return resolve(true);
+            writeStream.write(decryptedChunk, error => error ? reject(error) : resolve(true));
+          });
+        }
+        
+        position += bytesRead;
+        totalDecrypted += decryptedChunk.length;
+        logger.debug(`Decrypted ${totalDecrypted} bytes of video data`, { inputPath });
+      }
+      
+      // Finalize decryption
+      const finalChunk = decipher.final();
+      if (finalChunk.length > 0) {
+        await new Promise((resolve, reject) => {
+          if (!writeStream) return resolve(true);
+          writeStream.write(finalChunk, error => error ? reject(error) : resolve(true));
+        });
+      }
+      
+      // Close the write stream
+      await new Promise((resolve) => {
+        if (!writeStream) return resolve(true);
+        writeStream.end(resolve);
+      });
+      
+      logger.info(`Successfully decrypted video file: ${inputPath} -> ${outputPath}`, {
+        inputPath,
+        outputPath,
+        totalDecrypted
+      });
+      
+      return outputPath;
+      
+    } catch (error) {
+      // Clean up any partial output on error
+      try {
+        if (writeStream) {
+          writeStream.destroy();
+        }
+        if (await fs.promises.access(outputPath).then(() => true).catch(() => false)) {
+          await unlink(outputPath);
+        }
+      } catch (cleanupError) {
+        logger.error('Error during cleanup after decryption failure:', cleanupError);
+      }
+      
+      logger.error('Error decrypting video file:', { 
+        inputPath, 
+        outputPath,
+        error: error.message 
+      });
+      
+      throw new Error(`Failed to decrypt video file: ${error.message}`);
+      
+    } finally {
+      // Clean up file handles
+      if (fileHandle) {
+        await fileHandle.close().catch(error => 
+          logger.warn('Error closing file handle:', error)
+        );
+      }
+      if (writeStream && !writeStream.destroyed) {
+        writeStream.destroy();
+      }
     }
   }
 

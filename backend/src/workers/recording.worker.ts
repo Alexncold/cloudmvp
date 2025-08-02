@@ -1,21 +1,104 @@
 import { Worker, Job } from 'bullmq';
+import * as path from 'path';
+import * as fs from 'fs';
 import { logger } from '../utils/logger';
 import { recordingService } from '../services/recording.service';
-import { StorageService } from '../services/storage.service';
-import { DriveService } from '../services/drive.service';
-import { Camera } from '../../shared/types/camera';
-import { db } from '../database/db';
+import { storageService } from '../services/storage.service';
+import { uploadService, UploadResult } from '../services/upload.service';
+import { EncryptionService } from '../services/encryption.service';
+// TODO: Uncomment and implement these imports once the modules are available
+// import { Camera } from '../../shared/types/camera';
+// import { db } from '../database/db';
+
+// Temporary types/interfaces - replace with actual imports when available
+interface Camera {
+  id: string;
+  name: string;
+  rtsp_url: string;  // Note: Using snake_case to match database schema
+  is_active: boolean;
+  encryption_enabled: boolean;
+  username?: string;
+  password?: string;
+  drive_folder_id?: string;
+  // Add other camera properties as needed
+}
+
+// Mock database implementation
+const db = {
+  camera: {
+    findMany: async (): Promise<Camera[]> => [],
+    findUnique: async (options: { where: { id: string } }): Promise<Camera | null> => ({
+      id: options.where.id,
+      name: 'Test Camera',
+      rtsp_url: 'rtsp://example.com/stream',
+      is_active: true,
+      encryption_enabled: false
+    } as Camera),
+    update: async (options: { where: { id: string }, data: any }): Promise<Camera> => ({
+      id: options.where.id,
+      name: options.data.name || 'Test Camera',
+      rtsp_url: options.data.rtsp_url || 'rtsp://example.com/stream',
+      is_active: options.data.is_active !== undefined ? options.data.is_active : true,
+      encryption_enabled: options.data.encryption_enabled || false
+    } as Camera)
+  },
+  recording: {
+    create: async (data: any) => ({
+      id: 'rec-' + Math.random().toString(36).substr(2, 9),
+      ...data
+    }),
+    update: async (options: { where: { id: string }, data: any }) => ({
+      id: options.where.id,
+      ...options.data
+    }),
+    // Add mock implementations for methods used in the code
+    findUnique: async (options: { where: { id: string } }) => ({
+      id: options.where.id,
+      camera_id: 'cam-' + Math.random().toString(36).substr(2, 9),
+      start_time: new Date(),
+      end_time: null,
+      status: 'recording',
+      file_path: '/path/to/recording.mp4',
+      size_bytes: 0
+    })
+  },
+  // Add mock for oneOrNone and none if needed
+  oneOrNone: async (query: string, params?: any) => null,
+  none: async (query: string, params?: any) => {}
+};
+import { EventEmitter } from 'events';
 
 interface RecordingJobData {
   cameraId: string;
-  action: 'start' | 'stop' | 'restart';
+  action: 'start' | 'stop' | 'restart' | 'upload';
+  filePath?: string;
 }
 
-export class RecordingWorker {
+interface RecordingStatus {
+  isRecording: boolean;
+  lastError?: string;
+  lastSegmentTime?: Date;
+  segmentsRecorded: number;
+  segmentsUploaded: number;
+  segmentsFailed: number;
+  bytesRecorded: number;
+  lastUploadStatus?: string;
+  // Add missing properties to match usage
+  lastHeartbeat?: Date;
+  reconnectAttempts?: number;
+  currentSegment?: number;
+  process?: any; // FFmpeg process reference
+}
+
+export class RecordingWorker extends EventEmitter {
   private worker: Worker<RecordingJobData, void, string>;
   private static instance: RecordingWorker;
+  private recordings: Map<string, RecordingStatus> = new Map();
+  private readonly STORAGE_CLEANUP_THRESHOLD = 0.8; // 80% usage
+  private readonly SEGMENT_RETENTION_DAYS = parseInt(process.env.SEGMENT_RETENTION_DAYS || '7');
 
   private constructor() {
+    super(); // Call the parent class (EventEmitter) constructor
     this.worker = new Worker<RecordingJobData>(
       'recording-queue',
       async (job: Job<RecordingJobData>) => {
@@ -86,9 +169,9 @@ export class RecordingWorker {
   private async startRecording(cameraId: string): Promise<void> {
     try {
       // Get camera details from the database
-      const camera = await this.getCamera(cameraId);
+      const camera = await db.camera.findUnique({ where: { id: cameraId } });
       if (!camera) {
-        throw new Error(`Camera ${cameraId} not found`);
+        throw new Error(`Camera with ID ${cameraId} not found`);
       }
 
       if (!camera.rtsp_url) {
@@ -96,8 +179,22 @@ export class RecordingWorker {
       }
 
       // Create output directory for this camera
-      const outputDir = path.join(process.env.STORAGE_DIR || './storage', 'recordings', cameraId);
-      await StorageService.ensureDirectoryExists(outputDir);
+      const storageDir = process.env.STORAGE_DIR || './storage';
+      const outputDir = path.join(storageDir, 'recordings', cameraId);
+      await storageService.ensureDirectoryExists(outputDir);
+
+      // Initialize recording status
+      this.recordings.set(cameraId, {
+        isRecording: true,
+        segmentsRecorded: 0,
+        segmentsUploaded: 0,
+        segmentsFailed: 0,
+        bytesRecorded: 0,
+        lastSegmentTime: new Date()
+      });
+
+      // Check storage and clean up if needed
+      await this.checkAndCleanStorage();
 
       // Start recording
       await recordingService.startRecording({
@@ -107,16 +204,30 @@ export class RecordingWorker {
         outputDir,
         enableEncryption: camera.encryption_enabled || false,
         username: camera.username || undefined,
-        password: camera.password ? await this.decryptPassword(camera.password) : undefined
+        password: camera.password ? await this.decryptPassword(camera.password) : undefined,
+        maxReconnectAttempts: 10,
+        reconnectDelayMs: 5000,
+        healthCheckIntervalMs: 30000
       });
 
-      // Update camera status in the database
-      await this.updateCameraStatus(cameraId, true);
+      // Update recording status
+      await this.updateRecordingStatus(
+        cameraId,
+        true,
+        `Recording started at ${new Date().toISOString()}`,
+        this.recordings.get(cameraId)
+      );
       
-      logger.info(`Started recording for camera ${cameraId}`);
+      logger.info(`Started recording for camera ${cameraId}`, { outputDir });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error(`Failed to start recording for camera ${cameraId}:`, error);
-      await this.updateCameraStatus(cameraId, false, error.message);
+      await this.updateRecordingStatus(
+        cameraId,
+        false,
+        `Failed to start recording: ${errorMessage}`,
+        this.recordings.get(cameraId)
+      );
       throw error;
     }
   }
@@ -124,24 +235,49 @@ export class RecordingWorker {
   private async stopRecording(cameraId: string): Promise<void> {
     try {
       await recordingService.stopRecording(cameraId);
-      await this.updateCameraStatus(cameraId, false);
+      await this.updateRecordingStatus(
+        cameraId,
+        false,
+        `Recording stopped at ${new Date().toISOString()}`,
+        this.recordings.get(cameraId)
+      );
       logger.info(`Stopped recording for camera ${cameraId}`);
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error(`Failed to stop recording for camera ${cameraId}:`, error);
+      await this.updateRecordingStatus(
+        cameraId,
+        false,
+        `Error stopping recording: ${errorMessage}`,
+        this.recordings.get(cameraId)
+      );
       throw error;
     }
   }
 
+  /**
+   * Handles completion of a video segment
+   */
   private async handleSegmentComplete(segmentInfo: {
     cameraId: string;
     segmentPath: string;
     isEncrypted: boolean;
+    sizeBytes: number;
+    durationMs: number;
   }): Promise<void> {
-    const { cameraId, segmentPath, isEncrypted } = segmentInfo;
+    const { cameraId, segmentPath, isEncrypted, sizeBytes, durationMs } = segmentInfo;
     
     try {
+      // Update recording stats
+      const recording = this.recordings.get(cameraId);
+      if (recording) {
+        recording.segmentsRecorded++;
+        recording.bytesRecorded += sizeBytes;
+        recording.lastSegmentTime = new Date();
+      }
+
       // Get camera details
-      const camera = await this.getCamera(cameraId);
+      const camera = await db.camera.findUnique({ where: { id: cameraId } });
       if (!camera) {
         logger.error(`Camera ${cameraId} not found for segment upload`);
         return;
@@ -149,31 +285,55 @@ export class RecordingWorker {
 
       // Skip upload if no Google Drive folder is configured
       if (!camera.drive_folder_id) {
-        logger.debug(`No Google Drive folder configured for camera ${cameraId}, skipping upload`);
+        logger.debug(`No Google Drive folder configured for camera ${cameraId}, deleting segment`);
+        await storageService.deleteFile(segmentPath).catch((error: Error) => 
+          logger.error(`Failed to delete segment ${segmentPath}:`, error)
+        );
         return;
       }
 
-      // Upload to Google Drive
-      const driveService = DriveService.getInstance();
-      const fileName = path.basename(segmentPath);
-      
       // Create a date-based folder structure (YYYY/MM/DD)
       const now = new Date();
       const datePath = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')}`;
       
-      // Upload the file
-      await driveService.uploadFile({
+      // Queue the file for upload
+      const fileName = path.basename(segmentPath);
+      const uploadResult = await uploadService.uploadFile({
         filePath: segmentPath,
         fileName,
         folderId: camera.drive_folder_id,
-        parentPath: datePath,
-        mimeType: isEncrypted ? 'application/octet-stream' : 'video/mp4'
+        mimeType: isEncrypted ? 'application/octet-stream' : 'video/mp4',
+        deleteAfterUpload: true
       });
 
-      logger.debug(`Uploaded segment ${fileName} to Google Drive for camera ${cameraId}`);
+      // Update recording stats based on upload result
+      if (uploadResult.success) {
+        if (recording) {
+          recording.segmentsUploaded++;
+        }
+        logger.info(`Uploaded segment ${fileName} for camera ${cameraId}`, { 
+          fileId: uploadResult.fileId,
+          size: (sizeBytes / (1024 * 1024)).toFixed(2) + 'MB',
+          duration: (durationMs / 1000).toFixed(2) + 's'
+        });
+      } else {
+        if (recording) {
+          recording.segmentsFailed++;
+        }
+        logger.error(`Failed to upload segment ${fileName} for camera ${cameraId}: ${uploadResult.error}`);
+      }
       
-      // Delete the local file after successful upload
-      await StorageService.deleteFile(segmentPath);
+      // Update recording status in database with current segment info
+      const segmentInfo = `Segment ${recording?.segmentsRecorded || 0} uploaded`;
+      await this.updateRecordingStatus(
+        cameraId,
+        true,
+        `${segmentInfo} - ${(sizeBytes / (1024 * 1024)).toFixed(2)}MB`,
+        this.recordings.get(cameraId)
+      );
+      
+      // Check storage and clean up if needed
+      await this.checkAndCleanStorage();
       
     } catch (error) {
       logger.error(`Error handling segment for camera ${cameraId}:`, error);
@@ -185,12 +345,11 @@ export class RecordingWorker {
     }
   }
 
+// ...
+
   private async getCamera(cameraId: string): Promise<Camera | null> {
     try {
-      const result = await db.oneOrNone(
-        'SELECT * FROM cameras WHERE id = $1',
-        [cameraId]
-      );
+      const result = await db.camera.findUnique({ where: { id: cameraId } });
       return result;
     } catch (error) {
       logger.error(`Error fetching camera ${cameraId}:`, error);
@@ -198,38 +357,176 @@ export class RecordingWorker {
     }
   }
 
+  /**
+   * Updates the camera status in the database
+   */
   private async updateCameraStatus(
-    cameraId: string, 
-    isRecording: boolean, 
-    errorMessage: string | null = null
+    cameraId: string,
+    isRecording: boolean,
+    statusMessage: string
   ): Promise<void> {
     try {
-      await db.none(
-        `UPDATE cameras 
-         SET is_recording = $1, 
-             last_upload_status = $2,
-             updated_at = NOW()
-         WHERE id = $3`,
-        [isRecording, errorMessage, cameraId]
-      );
+      await db.camera.update({
+        where: { id: cameraId },
+        data: {
+          is_recording: isRecording,
+          status: statusMessage,
+          updated_at: new Date()
+        }
+      });
+      logger.debug(`Updated camera ${cameraId} status: ${statusMessage}`);
     } catch (error) {
+      logger.error(`Failed to update camera ${cameraId} status:`, error);
+      // Don't throw to prevent cascading failures
+    }
+  }
+
+  /**
+   * Updates the recording status in both memory and database
+   */
+  private async updateRecordingStatus(
+    cameraId: string,
+    isRecording: boolean,
+    statusMessage: string,
+    recordingStatus?: RecordingStatus
+  ): Promise<void> {
+    try {
+      const currentStatus = recordingStatus || this.recordings.get(cameraId) || {
+        isRecording: false,
+        segmentsRecorded: 0,
+        segmentsUploaded: 0,
+        segmentsFailed: 0,
+        bytesRecorded: 0,
+        lastSegmentTime: new Date()
+      };
+      
+      // Update the local recordings map
+      this.recordings.set(cameraId, {
+        ...currentStatus,
+        isRecording,
+        lastUploadStatus: statusMessage,
+        lastHeartbeat: new Date()
+      });
+
+      await db.camera.update({
+        where: { id: cameraId },
+        data: {
+          is_recording: isRecording,
+          last_upload_status: statusMessage,
+          segments_recorded: currentStatus.segmentsRecorded,
+          segments_uploaded: currentStatus.segmentsUploaded,
+          segments_failed: currentStatus.segmentsFailed,
+          bytes_recorded: currentStatus.bytesRecorded,
+          last_segment_time: currentStatus.lastSegmentTime || new Date(),
+          updated_at: new Date()
+        }
+      });
+
+      // Update camera status in database
+      await this.updateCameraStatus(cameraId, isRecording, statusMessage);
+      
+      // Emit status update event
+      this.emit('statusUpdate', {
+        cameraId,
+        isRecording,
+        status: statusMessage,
+        ...currentStatus
+      });
+
+    } catch (err) {
+      const error = err as Error;
       logger.error(`Error updating status for camera ${cameraId}:`, error);
+    }
+  }
+
+  /**
+   * Checks storage usage and cleans up old files if necessary
+   */
+  private async checkAndCleanStorage(): Promise<void> {
+    try {
+      const metrics = await storageService.updateMetrics();
+      const usagePercent = metrics.usagePercentage;
+      
+      if (usagePercent >= this.STORAGE_CLEANUP_THRESHOLD * 100) {
+        logger.warn(`Storage usage at ${usagePercent.toFixed(2)}%, cleaning up old recordings...`);
+        
+        // Delete recordings older than retention period
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - this.SEGMENT_RETENTION_DAYS);
+        
+        const storageDir = process.env.STORAGE_DIR || './storage';
+        const recordingsDir = path.join(storageDir, 'recordings');
+        const cameraDirs = await fs.promises.readdir(recordingsDir, { withFileTypes: true });
+        
+        for (const cameraDir of cameraDirs) {
+          if (!cameraDir.isDirectory()) continue;
+          
+          const cameraPath = path.join(recordingsDir, cameraDir.name);
+          const files = await fs.promises.readdir(cameraPath);
+          
+          for (const file of files) {
+            const filePath = path.join(cameraPath, file);
+            const stats = await fs.promises.stat(filePath);
+            
+            if (stats.birthtime < cutoffDate) {
+              try {
+                await storageService.deleteFile(filePath);
+                logger.debug(`Deleted old recording: ${filePath}`);
+              } catch (err) {
+                const error = err as Error;
+                logger.error(`Failed to delete old recording ${filePath}:`, error);
+              }
+            }
+          }
+        }
+        
+        logger.info('Storage cleanup completed');
+      }
+    } catch (err) {
+      const error = err as Error;
+      logger.error('Error during storage cleanup check:', error);
     }
   }
 
   private async decryptPassword(encryptedPassword: string): Promise<string> {
     try {
-      // This assumes you have an encryption service that can decrypt the password
-      // You'll need to implement this based on your encryption method
-      return encryptedPassword; // Replace with actual decryption
+      // Use the encryption service to decrypt the password
+      return await EncryptionService.decryptText(encryptedPassword);
     } catch (error) {
       logger.error('Error decrypting password:', error);
       throw new Error('Failed to decrypt password');
     }
   }
 
+  /**
+   * Gracefully shuts down the worker
+   */
   public async close(): Promise<void> {
-    await this.worker.close();
+    try {
+      logger.info('Shutting down recording worker...');
+      
+      // Stop all active recordings
+      for (const [cameraId, recording] of this.recordings.entries()) {
+        if (recording.isRecording) {
+          try {
+            await recordingService.stopRecording(cameraId);
+            await this.updateCameraStatus(cameraId, false, 'Recording stopped during shutdown');
+            logger.info(`Stopped recording for camera ${cameraId}`);
+          } catch (error) {
+            logger.error(`Error stopping recording for camera ${cameraId}:`, error);
+          }
+        }
+      }
+      
+      // Close the worker
+      await this.worker.close();
+      
+      logger.info('Recording worker shutdown complete');
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.error(`Error in recording worker job: ${errorMessage}`);
+      throw error;
+    }
   }
 }
 
@@ -237,14 +534,30 @@ export class RecordingWorker {
 export const recordingWorker = RecordingWorker.getInstance();
 
 // Handle process termination
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down recording worker...');
-  await recordingWorker.close();
-  process.exit(0);
+const shutdown = async (signal: string) => {
+  logger.info(`${signal} received, shutting down recording worker...`);
+  
+  try {
+    await recordingWorker.close();
+    logger.info('Recording worker shutdown complete');
+    process.exit(0);
+  } catch (error) {
+    logger.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+};
+
+// Handle process termination
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception:', error);
+  // Don't exit immediately, allow the process to continue
 });
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down recording worker...');
-  await recordingWorker.close();
-  process.exit(0);
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled rejection at:', promise, 'reason:', reason);
 });

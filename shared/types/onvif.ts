@@ -1,4 +1,18 @@
-import { CameraCapabilities, CommonCredential } from '../../backend/src/utils/camera-config-database';
+// Local type definitions to avoid circular dependencies
+import type { CommonCredential } from '../../backend/src/utils/camera-config-database';
+
+export interface CameraCapabilities {
+  streaming: boolean;
+  ptz: boolean;
+  audio: boolean;
+  motionDetection: boolean;
+  analytics: boolean;
+  nightVision: boolean;
+  events: boolean;
+  snapshots: boolean;
+  recording: boolean;
+  [key: string]: boolean; // Allow for additional capabilities
+}
 
 export interface DiscoveredCamera {
   ip: string;
@@ -19,6 +33,12 @@ export interface RTSPUrlInfo {
   streamType: 'main' | 'sub' | 'mobile';
   resolution: string; // '1920x1080' | 'auto-detect'
   confidence: number;
+  tested: boolean;
+  authType?: 'basic' | 'digest' | 'none';
+  bitrate?: number;
+  framerate?: number;
+  codec?: string;
+  source?: 'manufacturer' | 'common' | 'auto-detected';
 }
 
 export interface SuggestedCredential extends CommonCredential {
@@ -46,7 +66,14 @@ export interface HeartbeatResult {
   onvif: boolean;
   rtsp: boolean;
   timestamp: Date;
-  error?: string;
+  details: {
+    pingError?: string;
+    onvifError?: string;
+    rtspError?: string;
+    rtspUrls?: RTSPUrlInfo[];
+    error?: string;
+    [key: string]: any;
+  };
 }
 
 export interface CameraDiscoveryOptions {

@@ -30,8 +30,8 @@ export async function setupTestDatabase() {
     
     // Run each migration file in order
     const migrations = [
-      '../database/migrations/001_initial_schema.sql',
-      '../database/migrations/002_add_user_drive_fields.sql',
+      path.join(__dirname, '../../database/migrations/001_initial_schema.sql'),
+      path.join(__dirname, '../../database/migrations/002_add_user_drive_fields.sql'),
     ];
     
     for (const migration of migrations) {

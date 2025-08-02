@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="6" failures="6" errors="0" time="0.629">
+  <testsuite name="Integration: Recording Worker" errors="0" failures="6" skipped="0" timestamp="2025-07-30T03:02:42" time="0.212" tests="6">
+    <testcase classname="Integration: Recording Worker Recording Lifecycle should start recording for a camera" name="Integration: Recording Worker Recording Lifecycle should start recording for a camera" time="0.001">
+      <failure>TypeError: Cannot read properties of undefined (reading &apos;error&apos;)
+    at RecordingWorker.startRecording (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:224:14)
+    at async Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:107:7)</failure>
+    </testcase>
+    <testcase classname="Integration: Recording Worker Recording Lifecycle should handle recording errors" name="Integration: Recording Worker Recording Lifecycle should handle recording errors" time="0.014">
+      <failure>Error: expect(received).rejects.toThrow(expected)
+
+Expected message: &quot;Failed to start recording&quot;
+Received message: &quot;Cannot read properties of undefined (reading &apos;error&apos;)&quot;
+
+      222 |     } catch (error) {
+      223 |       const errorMessage = error instanceof Error ? error.message : &apos;Unknown error&apos;;
+    &gt; 224 |       logger.error(`Failed to start recording for camera ${cameraId}:`, error);
+          |              ^
+      225 |       await this.updateRecordingStatus(
+      226 |         cameraId,
+      227 |         false,
+
+      at RecordingWorker.startRecording (src/workers/recording.worker.ts:224:14)
+      at async Object.&lt;anonymous&gt; (test/integration/recording.worker.integration.test.ts:135:7)
+    at Object.toThrow (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/node_modules/expect/build/index.js:218:22)
+    at Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:135:69)
+    at Promise.then.completed (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/utils.js:298:28)
+    at new Promise (&lt;anonymous&gt;)
+    at callAsyncCircusFn (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/utils.js:231:10)
+    at _callCircusTest (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:316:40)
+    at async _runTest (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:252:3)
+    at async _runTestsForDescribeBlock (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:126:9)
+    at async _runTestsForDescribeBlock (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:121:9)
+    at async _runTestsForDescribeBlock (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:121:9)
+    at async run (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/run.js:71:3)
+    at async runAndTransformResultsToJestFormat (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapterInit.js:122:21)
+    at async jestAdapter (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-circus/build/legacy-code-todo-rewrite/jestAdapter.js:79:19)
+    at async runTestInternal (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-runner/build/runTest.js:367:16)
+    at async runTest (/Users/alejandro/cloudcam/cloudmvp/backend/node_modules/jest-runner/build/runTest.js:444:34)</failure>
+    </testcase>
+    <testcase classname="Integration: Recording Worker Recording Lifecycle should stop recording for a camera" name="Integration: Recording Worker Recording Lifecycle should stop recording for a camera" time="0">
+      <failure>TypeError: Cannot read properties of undefined (reading &apos;error&apos;)
+    at RecordingWorker.stopRecording (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:247:14)
+    at async Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:149:7)</failure>
+    </testcase>
+    <testcase classname="Integration: Recording Worker Segment Handling should handle segment completion and upload" name="Integration: Recording Worker Segment Handling should handle segment completion and upload" time="0">
+      <failure>TypeError: Cannot read properties of undefined (reading &apos;error&apos;)
+    at RecordingWorker.handleSegmentComplete (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:339:14)
+    at async Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:180:7)</failure>
+    </testcase>
+    <testcase classname="Integration: Recording Worker Segment Handling should handle upload failures" name="Integration: Recording Worker Segment Handling should handle upload failures" time="0">
+      <failure>TypeError: Cannot read properties of undefined (reading &apos;error&apos;)
+    at RecordingWorker.handleSegmentComplete (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:339:14)
+    at async Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:219:7)</failure>
+    </testcase>
+    <testcase classname="Integration: Recording Worker Storage Management should clean up old recordings when storage is full" name="Integration: Recording Worker Storage Management should clean up old recordings when storage is full" time="0">
+      <failure>TypeError: Cannot read properties of undefined (reading &apos;error&apos;)
+    at RecordingWorker.checkAndCleanStorage (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:487:14)
+    at async Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:277:7)</failure>
+    </testcase>
+    <testcase classname=" Test execution failure: could be caused by test hooks like &apos;afterAll&apos;." name=" Test execution failure: could be caused by test hooks like &apos;afterAll&apos;." time="0">
+      <failure>{&quot;message&quot;:&quot;&quot;,&quot;stack&quot;:&quot;TypeError: Cannot read properties of undefined (reading &apos;error&apos;)\n    at RecordingWorker.close (/Users/alejandro/cloudcam/cloudmvp/backend/src/workers/recording.worker.ts:527:14)\n    at Object.&lt;anonymous&gt; (/Users/alejandro/cloudcam/cloudmvp/backend/test/integration/recording.worker.integration.test.ts:90:18)&quot;}</failure>
+    </testcase>
+  </testsuite>
+</testsuites>

@@ -15,10 +15,10 @@ export interface DriveFileMetadata {
   id: string;
   name: string;
   mimeType: string;
-  size?: number;
+  size: number;
   webViewLink?: string;
-  createdTime?: string;
-  modifiedTime?: string;
+  createdTime: string;
+  modifiedTime: string;
   isEncrypted?: boolean;
   md5Checksum?: string;
   parents?: string[];
@@ -30,7 +30,7 @@ export interface DriveFileMetadata {
 export interface UploadFileOptions {
   filePath: string;
   fileName: string;
-  folderId?: string;
+  folderId: string;
   parentPath?: string[];
   mimeType?: string;
   isPublic?: boolean;
@@ -39,13 +39,13 @@ export interface UploadFileOptions {
 }
 
 export interface QuotaInfo {
-  limit: number;
-  usage: number;
-  remaining: number;
-  usageInDrive: number;
-  usageInDriveTrash: number;
-  lastUpdated: Date;
+  limit: number; // in bytes
+  usage: number; // in bytes
+  usageInDrive: number; // in bytes
+  usageInDriveTrash: number; // in bytes
+  remaining: number; // in bytes
   isLow: boolean;
+  lastUpdated: Date;
 }
 
 export interface DriveServiceConfig {
@@ -63,38 +63,6 @@ const QUOTA_CHECK_THRESHOLD_BYTES = 100 * 1024 * 1024; // 100MB
 
 // Simple sleep function for retries
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Types
-export interface QuotaInfo {
-  limit: number; // in bytes
-  usage: number; // in bytes
-  usageInDrive: number; // in bytes
-  remaining: number; // in bytes
-  isLow: boolean;
-  lastUpdated: Date;
-}
-
-export interface DriveFileMetadata {
-  id: string;
-  name: string;
-  mimeType: string;
-  size: number;
-  createdTime: string;
-  modifiedTime: string;
-  webViewLink?: string;
-  webContentLink?: string;
-  isEncrypted?: boolean;
-  encryptionKeyId?: string;
-  iv?: string; // Initialization vector for encryption
-}
-
-export interface UploadFileOptions {
-  filePath: string;
-  fileName: string;
-  folderId: string;
-  parentPath?: string;
-  mimeType?: string;
-}
 
 export interface CreateFolderOptions {
   name: string;
@@ -443,13 +411,13 @@ export class DriveService {
           // Return file metadata
           return {
             id: file.data.id!,
-            name: file.data.name,
-            mimeType: file.data.mimeType,
+            name: file.data.name || 'Unnamed file',
+            mimeType: file.data.mimeType || 'application/octet-stream',
             size: fileSize,
-            createdTime: file.data.createdTime,
-            modifiedTime: file.data.modifiedTime,
-            webViewLink: file.data.webViewLink,
-            webContentLink: file.data.webContentLink,
+            createdTime: file.data.createdTime || new Date().toISOString(),
+            modifiedTime: file.data.modifiedTime || new Date().toISOString(),
+            webViewLink: file.data.webViewLink || undefined,
+            webContentLink: file.data.webContentLink || undefined,
             isEncrypted: !!this.encryptionKey,
             encryptionKeyId: this.encryptionKey ? 'default' : undefined,
             iv: this.encryptionKey ? encryptionInfo.iv.toString('base64') : undefined,
@@ -534,16 +502,13 @@ export class DriveService {
         if (!folder.data.id) {
           throw new Error(`Failed to create folder: ${currentFolder}`);
         }
+        folderId = folder.data.id;
+      }
       
-      const response = await this.drive.files.get(
-        { fileId, alt: 'media' },
-        { responseType: 'stream' }
-      );
-
-      return new Promise((resolve, reject) => {
-        response.data
-          .on('end', () => {
-      throw new Error(`Failed to find file '${fileName}': ${errorMsg}`);
+      return folderId;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Error in ensureFolderPath: ${errorMsg}`);
     }
   }
   
