@@ -1,374 +1,637 @@
-import { Request, Response } from 'express';
-import { IncomingHttpHeaders } from 'http';
-import createAuthController from '../../../src/controllers/authController';
-import { DatabaseService } from '../../../src/services/db';
+import { Request, Response, NextFunction } from 'express';
+import { AuthController } from '../../../src/controllers/authController';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { PoolClient } from 'pg';
+import { db } from '../../../src/services/database';
 
-// Mock the DatabaseService
-jest.mock('../../../src/services/db');
-const mockDbService = {
-  getClient: jest.fn(),
-  query: jest.fn()
-} as unknown as DatabaseService;
+// Create a properly typed mock for the database
+const mockQuery = jest.fn<Promise<QueryResult>, [string, any[]?]>();
+const mockGetClient = jest.fn<Promise<PoolClient>, []>();
+const mockClose = jest.fn<Promise<void>, []>();
+const mockConnect = jest.fn<Promise<void>, []>();
 
-// Create an instance of AuthController using the factory function
-const authController = createAuthController();
-const {
-  login,
-  register,
-  verifyEmail,
-  refreshToken,
-  logout,
-  getCurrentUser
-} = authController;
+// Mock the database module
+jest.mock('../../../src/services/database', () => ({
+  db: {
+    query: mockQuery,
+    getClient: mockGetClient,
+    close: mockClose,
+    connect: mockConnect
+  }
+}));
 
-// Create a custom mock response type that matches our implementation
-type MockResponse = Response & {
-  status: jest.Mock<MockResponse, [number]>;
-  json: jest.Mock<MockResponse, [any]>;
-  send: jest.Mock<MockResponse, [any?]>;
-  sendStatus: jest.Mock<MockResponse, [number]>;
-  redirect: jest.Mock<MockResponse, [string]> & ((status: number, url: string) => void);
-  cookie: jest.Mock<MockResponse, [string, string, any?]>;
-  clearCookie: jest.Mock<MockResponse, [string, any?]>;
-  locals: Record<string, any>;
-  [key: string]: any;
+// Create a mock PoolClient
+const mockPoolClient: Partial<PoolClient> = {
+  query: jest.fn(),
+  release: jest.fn()
 };
 
-// Mock request and response helpers
-const mockRequest = (overrides: Partial<Request> = {}): Partial<Request> => ({
-  body: {},
-  params: {},
-  query: {},
-  headers: {} as IncomingHttpHeaders,
-  ...overrides,
+// Set up default mock implementations
+beforeEach(() => {
+  // Reset all mocks
+  jest.clearAllMocks();
+  
+  // Set up default mock implementations
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0, command: '', oid: 0, fields: [] });
+  mockGetClient.mockResolvedValue(mockPoolClient as PoolClient);
+  mockClose.mockResolvedValue(undefined);
+  mockConnect.mockResolvedValue(undefined);
+  
+  // Set up other mocks
+  (jwt.sign as jest.Mock).mockReturnValue('mocked-jwt-token');
+  (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-password');
+  (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+  
+  // Set up email service mock if needed
+  if (emailService) {
+    (emailService.sendVerificationEmail as jest.Mock)?.mockResolvedValue(undefined);
+    (emailService.sendPasswordResetEmail as jest.Mock)?.mockResolvedValue(undefined);
+  }
 });
 
-const mockResponse = () => {
-  const res: any = {};
-  res.status = jest.fn().mockImplementation((status) => {
-    console.log(`Response status set to: ${status}`);
-    res.statusCode = status;
-    return res;
-  });
-  res.json = jest.fn().mockImplementation((body) => {
-    console.log('Response body:', JSON.stringify(body, null, 2));
-    return res;
-  });
-  res.send = jest.fn().mockReturnValue(res);
-  res.sendStatus = jest.fn().mockReturnValue(res);
-  res.redirect = jest.fn().mockImplementation(((url: string) => res) as any);
-  res.cookie = jest.fn().mockReturnValue(res);
-  res.clearCookie = jest.fn().mockReturnValue(res);
-  res.locals = {};
+afterAll(async () => {
+  // Clean up any resources if needed
+  jest.restoreAllMocks();
+});
+
+// Types for database query results
+type QueryResult<T = any> = {
+  rows: T[];
+  rowCount: number;
+  command?: string;
+  oid?: number;
+  fields?: any[];
+};
+
+// Type for the mock database
+type MockDb = {
+  query: jest.Mock<Promise<QueryResult>, [string, any[]?]>;
+  getClient: jest.Mock<Promise<PoolClient>, []>;
+  close: jest.Mock<Promise<void>, []>;
+  connect: jest.Mock<Promise<void>, []>;
+};
+
+// Setup mocks
+jest.mock('bcryptjs', () => ({
+  hash: jest.fn().mockResolvedValue('hashedPassword'),
+  compare: jest.fn().mockResolvedValue(true),
+  genSalt: jest.fn().mockResolvedValue('mockSalt')
+}));
+
+jest.mock('jsonwebtoken', () => ({
+  sign: jest.fn().mockReturnValue('mock-token'),
+  verify: jest.fn().mockReturnValue({
+    userId: 'test-user-id',
+    email: 'test@example.com',
+    role: 'user',
+    type: 'access'
+  }),
+  TokenExpiredError: class MockTokenExpiredError extends Error {
+    constructor() {
+      super('Token expired');
+      this.name = 'TokenExpiredError';
+    }
+  },
+  JsonWebTokenError: class MockJsonWebTokenError extends Error {
+    constructor() {
+      super('Invalid token');
+      this.name = 'JsonWebTokenError';
+    }
+  }
+}));
+
+jest.mock('uuid', () => ({
+  v4: () => 'mock-uuid'
+}));
+
+// Mock crypto module with proper TypeScript types
+const mockRandomBytes = jest.fn().mockReturnValue({ toString: () => 'mock-token' });
+
+jest.mock('crypto', () => ({
+  randomBytes: mockRandomBytes
+}));
+
+// Use manual mocks for database and email service
+jest.mock('../../../src/services/emailService', () => ({
+  sendVerificationEmail: jest.fn().mockResolvedValue(undefined),
+  sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined)
+}));
+
+// Import the mocked modules
+const emailService = require('../../../src/services/emailService');
+
+// Helper types for request and response mocks
+interface MockRequest extends Partial<Request> {
+  body?: any;
+  params?: Record<string, string>;
+  query?: Record<string, string | string[]>;
+  headers?: Record<string, string>;
+  cookies?: Record<string, string>;
+  user?: any;
+}
+
+type MockResponse = {
+  status: jest.Mock<any, [number]>;
+  json: jest.Mock<any, [any]>;
+  send: jest.Mock<any, [any?]>;
+  sendStatus: jest.Mock<any, [number]>;
+  redirect: jest.Mock<any, [string | number, string?]>;
+  cookie: jest.Mock<any, [string, string, any?]>;
+  clearCookie: jest.Mock<any, [string, any?]>;
+  locals: Record<string, any>;
+  [key: string]: any; // For any other properties that might be accessed
+};
+
+// Helper function to create a mock request
+const mockRequest = (overrides: MockRequest = {}): MockRequest => {
+  const req: MockRequest = {
+    body: {},
+    params: {},
+    query: {},
+    headers: {},
+    cookies: {},
+    ...overrides,
+  };
+  return req;
+};
+
+// Helper function to create a mock response
+const mockResponse = (): MockResponse => {
+  const res: MockResponse = {
+    status: jest.fn(),
+    json: jest.fn(),
+    send: jest.fn(),
+    sendStatus: jest.fn(),
+    redirect: jest.fn(),
+    cookie: jest.fn(),
+    clearCookie: jest.fn(),
+    locals: {}
+  };
+
+  // Chain the methods
+  res.status.mockReturnValue(res);
+  res.json.mockReturnValue(res);
+  res.send.mockReturnValue(res);
+  res.sendStatus.mockReturnValue(res);
+  res.redirect.mockReturnValue(res);
+  res.cookie.mockReturnValue(res);
+  res.clearCookie.mockReturnValue(res);
+
   return res;
 };
 
-// Mock JWT and bcrypt
-jest.mock('jsonwebtoken', () => ({
-  sign: jest.fn().mockReturnValue('mockToken'),
-  verify: jest.fn().mockImplementation(() => ({
-    userId: 'user123',
-    email: 'test@example.com',
-    type: 'access'
-  }))
-}));
-
-jest.mock('bcryptjs', () => ({
-  hash: jest.fn().mockResolvedValue('hashedPassword'),
-  compare: jest.fn().mockResolvedValue(true)
-}));
-
 describe('Auth Controller', () => {
+  let authController: AuthController;
   let req: Partial<Request>;
   let res: MockResponse;
   let mockClient: any;
 
+  beforeAll(() => {
+    // Setup default mock implementations
+    (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
+    (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+    (bcrypt.genSalt as jest.Mock).mockResolvedValue('mockSalt');
+    (jwt.sign as jest.Mock).mockReturnValue('mockToken');
+    (jwt.verify as jest.Mock).mockReturnValue({
+      userId: 'test-user-id',
+      email: 'test@example.com',
+      role: 'user',
+      type: 'access'
+    });
+  });
+
   beforeEach(() => {
-    // Reset mocks before each test
-    jest.clearAllMocks();
-    
-    // Setup default request and response objects
+    // Create fresh instances for each test
+    authController = new AuthController();
     req = mockRequest();
     res = mockResponse();
     
-    // Setup default database mock client
+    // Reset all mocks
+    jest.clearAllMocks();
+    
+    // Setup default mock client
     mockClient = {
-      query: jest.fn().mockResolvedValue({ 
-        rows: [], 
-        rowCount: 0,
-        command: '',
-        oid: 0,
-        fields: []
-      }),
+      query: jest.fn(),
       release: jest.fn()
     };
     
-    (mockDbService.getClient as jest.Mock).mockResolvedValue(mockClient);
+    // Setup default database mock implementations
+    mockQuery.mockReset();
+    mockGetClient.mockResolvedValue(mockClient as PoolClient);
+    mockClose.mockReset();
+    mockConnect.mockReset();
+    
+    // Set up default mock responses
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 0, command: '', oid: 0, fields: [] });
+    mockGetClient.mockResolvedValue(mockClient as PoolClient);
+    
+    // Reset other mocks
+    (jwt.sign as jest.Mock).mockReturnValue('mocked-jwt-token');
+    (bcrypt.hash as jest.Mock).mockResolvedValue('hashed-password');
+    (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+    
+    // Reset email service mocks
+    if (emailService) {
+      (emailService.sendVerificationEmail as jest.Mock)?.mockResolvedValue(undefined);
+      (emailService.sendPasswordResetEmail as jest.Mock)?.mockResolvedValue(undefined);
+    }
+  });
+
+  afterEach(() => {
+    // Clean up after each test
+    jest.clearAllMocks();
+  });
+  
+  afterAll(async () => {
+    // Restore all mocks
+    jest.restoreAllMocks();
   });
 
   describe('register', () => {
     it('should register a new user successfully', async () => {
-      // Mock request body
-      req.body = {
-        email: 'test@example.com',
-        password: 'password123',
-        name: 'Test User'
+      // Arrange
+      const testReq = {
+        body: {
+          email: 'test@example.com',
+          password: 'password123',
+          name: 'Test User'
+        }
       };
+      
+      const testRes = mockResponse();
+      const next = jest.fn();
 
       // Mock database responses
-      const mockUser = {
-        id: 'user123',
-        email: 'test@example.com',
-        name: 'Test User',
-        password_hash: 'hashedpassword',
-        is_verified: false,
-        created_at: new Date(),
-        updated_at: new Date(),
-        google_id: null,
-        google_refresh_token: null,
-        verification_token: 'verification-token',
-        verification_token_expires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1 day from now
-        password_reset_token: null,
-        password_reset_expires: null,
-        refresh_token: null
-      };
-      
-      // Mock the database queries for user existence check and user creation
-      mockClient.query
-        .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // User doesn't exist
+      mockQuery
         .mockResolvedValueOnce({ 
-          rows: [mockUser], 
-          rowCount: 1 
-        }) // User created
-        .mockResolvedValue({ rows: [], rowCount: 0 }); // Any subsequent queries
+          rowCount: 0,
+          rows: [],
+          command: '',
+          oid: 0,
+          fields: []
+        }) // User doesn't exist
+        .mockResolvedValueOnce({ 
+          rowCount: 1,
+          rows: [{
+            id: 'user123',
+            email: 'test@example.com',
+            name: 'Test User',
+            password_hash: 'hashedPassword',
+            is_verified: false,
+            verification_token: 'mock-verification-token',
+            verification_token_expires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 1 day from now
+            created_at: new Date(),
+            updated_at: new Date()
+          }],
+          command: 'INSERT',
+          oid: 0,
+          fields: []
+        }); // User created
+        
+      // Configure JWT sign mock for tokens
+      (jwt.sign as jest.Mock).mockImplementation(() => 'mock-token');
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
 
-      // Call the register function
-      const next = jest.fn();
-      await register(req as Request, res as unknown as Response, next);
+      // Act
+      await authController.register(testReq as Request, testRes as unknown as Response, next);
 
-      // Assertions
-      expect(res.status).toHaveBeenCalledWith(201);
+      // Assert
+      expect(testRes.status).toHaveBeenCalledWith(201);
       
-      // Get the actual response that was sent
-      const responseArg = res.json.mock.calls[0][0];
-      
-      // Check the structure of the response
-      expect(responseArg).toHaveProperty('accessToken');
+      const responseArg = testRes.json.mock.calls[0][0];
+      expect(responseArg).toHaveProperty('accessToken', 'mock-token');
+      expect(responseArg).toHaveProperty('refreshToken', 'mock-token');
+      expect(responseArg).toHaveProperty('expiresIn', expect.any(Number));
+      expect(responseArg).toHaveProperty('message', 'Registration successful. Please check your email to verify your account.');
       expect(responseArg).toHaveProperty('user');
+      expect(responseArg.user).toHaveProperty('email', 'test@example.com');
+      expect(responseArg.user).toHaveProperty('is_verified', false);
       
-      // Check the user object structure
-      const user = responseArg.user;
-      expect(user).toHaveProperty('id', 'user123');
-      expect(user).toHaveProperty('email', 'test@example.com');
-      expect(user).toHaveProperty('is_verified', false);
-      expect(user).toHaveProperty('created_at');
-      expect(user).toHaveProperty('updated_at');
+      // Verify bcrypt was called with the password
+      expect(bcrypt.genSalt).toHaveBeenCalledWith(10);
+      expect(bcrypt.hash).toHaveBeenCalledWith('password123', 'mockSalt');
       
-      // The name might be in a name field or split into first_name/last_name
-      if ('name' in user) {
-        expect(user.name).toBe('Test User');
-      }
-      expect(res.cookie).toHaveBeenCalledWith(
-        'refreshToken',
+      // Verify JWT sign was called
+      expect(jwt.sign).toHaveBeenCalledWith(
+        { userId: expect.any(String), email: 'test@example.com' },
         expect.any(String),
-        expect.objectContaining({
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'strict',
-          maxAge: expect.any(Number)
-        })
+        { expiresIn: '15m' }
+      );
+      
+      // Verify email was sent
+      expect(emailService.sendVerificationEmail).toHaveBeenCalledWith(
+        'test@example.com',
+        expect.any(String) // verification token
       );
     });
 
     it('should return 400 if user already exists', async () => {
-      // Mock request body
+      // Arrange
       req.body = {
         email: 'existing@example.com',
         password: 'password123',
         name: 'Existing User'
       };
 
-      // Mock database response for existing user
-      mockClient.query.mockResolvedValueOnce({ 
-        rows: [{ id: 'existing123' }], 
-        rowCount: 1 
+      // Mock database response - user already exists
+      mockDb.query.mockResolvedValueOnce({
+        rowCount: 1,
+        rows: [{
+          id: 'existing-user-123',
+          email: 'existing@example.com',
+          name: 'Existing User',
+          password_hash: 'existing-hash',
+          is_verified: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        }]
       });
 
-      // Call the register function
-      const next = jest.fn();
-      await register(req as Request, res as unknown as Response, next);
+      // Act
+      await authController.register(req as Request, res as unknown as Response, jest.fn());
 
-      // Assertions
+      // Assert
       expect(res.status).toHaveBeenCalledWith(400);
       expect(res.json).toHaveBeenCalledWith({
-        error: 'User already exists'
+        success: false,
+        message: 'User already exists with this email'
+      });
+    });
+
+    it('should return 500 if database error occurs', async () => {
+      // Arrange
+      req.body = {
+        email: 'test@example.com',
+        password: 'password123',
+        name: 'Test User'
+      };
+
+      // Mock database to throw an error
+      mockDb.query.mockRejectedValueOnce(new Error('Database error'));
+
+      // Act
+      await authController.register(req as Request, res as unknown as Response, jest.fn());
+
+      // Assert
+      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.json).toHaveBeenCalledWith({
+        success: false,
+        message: 'Error registering user',
+        error: expect.any(Error)
       });
     });
   });
 
   describe('login', () => {
-    let bcrypt: any;
-    let jwt: any;
-    let mockClient: any;
-
-    beforeEach(() => {
-      // Reset mocks before each test
-      jest.clearAllMocks();
-      
-      // Setup default request and response objects
-      req = mockRequest();
-      res = mockResponse();
-      
-      // Get fresh mocks for each test
-      bcrypt = require('bcryptjs');
-      jwt = require('jsonwebtoken');
-      
-      // Setup mock client for database operations
-      mockClient = {
-        query: jest.fn(),
-        release: jest.fn().mockImplementation(() => Promise.resolve())
+    it('should login user with valid credentials', async () => {
+      // Arrange
+      const testReq = {
+        body: {
+          email: 'test@example.com',
+          password: 'password123'
+        }
       };
       
-      // Mock the database service to return our mock client
-      (mockDbService.getClient as jest.Mock).mockImplementation(() => {
-        console.log('getClient called, returning mock client');
-        return Promise.resolve(mockClient);
+      const testRes = mockResponse();
+      const next = jest.fn();
+
+      // Mock database response - user exists with hashed password
+      mockQuery.mockResolvedValue({
+        rowCount: 1,
+        rows: [{
+          id: 'user123',
+          email: 'test@example.com',
+          name: 'Test User',
+          password_hash: 'hashedPassword',
+          is_verified: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        }],
+        command: 'SELECT',
+        oid: 0,
+        fields: []
       });
 
-      // Mock the validationResult function
-      jest.mock('express-validator', () => ({
-        ...jest.requireActual('express-validator'),
-        validationResult: jest.fn().mockReturnValue({
-          isEmpty: () => true,
-          array: () => [],
-          formatWith: jest.fn().mockReturnThis(),
-          throw: jest.fn()
-        })
-      }));
-    });
+      // Configure bcrypt to return true for password comparison
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
 
-    it('should login a user with valid credentials', async () => {
-      // Mock request body
-      req.body = {
-        email: 'test@example.com',
-        password: 'password123'
-      };
+      // Configure JWT sign mock for tokens
+      (jwt.sign as jest.Mock).mockImplementation((payload, secret, options) => {
+        if (options?.expiresIn === '15m') return 'mock-access-token';
+        if (options?.expiresIn === '7d') return 'mock-refresh-token';
+        return 'mock-token';
+      });
 
-      // Mock database response for finding user
-      const mockUser = {
+      // Act
+      await authController.login(testReq as Request, testRes as unknown as Response, next);
+
+      // Assert
+      expect(testRes.status).toHaveBeenCalledWith(200);
+
+      const responseArg = testRes.json.mock.calls[0][0];
+      expect(responseArg).toHaveProperty('accessToken', 'mock-access-token');
+      expect(responseArg).toHaveProperty('refreshToken', 'mock-refresh-token');
+      expect(responseArg).toHaveProperty('expiresIn', 900); // 15 minutes in seconds
+      expect(responseArg).toHaveProperty('user');
+      expect(responseArg.user).toEqual({
         id: 'user123',
         email: 'test@example.com',
         name: 'Test User',
-        password_hash: 'hashedpassword',
-        is_verified: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-        google_id: null,
-        google_refresh_token: null,
-        verification_token: null,
-        verification_token_expires: null,
-        password_reset_token: null,
-        password_reset_expires: null,
-        refresh_token: null
-      };
-
-      // Mock the database queries for the login flow
-      mockClient.query
-        // First query: Find user by email
-        .mockResolvedValueOnce({ 
-          rows: [mockUser], 
-          rowCount: 1 
-        })
-        // Second query: Update refresh token
-        .mockResolvedValueOnce({ rowCount: 1 });
-
-      // Mock bcrypt.compare to return true (valid password)
-      bcrypt.compare.mockResolvedValueOnce(true);
-      
-      // Mock JWT sign to return tokens
-      jwt.sign.mockImplementation((payload: any) => {
-        return payload.type === 'access' ? 'mock-access-token' : 'mock-refresh-token';
+        is_verified: true
       });
 
-      // Call the login function
-      const next = jest.fn();
-      await login(req as Request, res as unknown as Response, next);
+      // Verify bcrypt was called with the correct password
+      expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashedPassword');
+
+      // Verify JWT sign was called with correct parameters
       
-      // Verify the response status was called with 200
-      expect(res.status).toHaveBeenCalledWith(200);
+      // Verify JWT sign was called
+      expect(jwt.sign).toHaveBeenCalledWith(
+        { userId: expect.any(String), email: 'test@example.com' },
+        expect.any(String),
+        { expiresIn: '15m' }
+      );
       
-      // Verify the response structure
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
-        user: expect.objectContaining({
+        email: 'test@example.com',
+        password: 'password123',
+        name: 'Test User'
+      }
+    }) as Request;
+    const res = mockResponse();
+    const next = jest.fn();
+
+    // Mock database responses
+    mockQuery.mockResolvedValueOnce({ 
+      rowCount: 0,
+      rows: [],
+      command: '',
+      oid: 0,
+      fields: []
+    }); // User doesn't exist
+    
+    mockQuery.mockResolvedValueOnce({ 
+      rowCount: 1,
+      rows: [{ 
+        id: 'user123', 
+        email: 'test@example.com', 
+        name: 'Test User', 
+        is_verified: false 
+      }],
+      command: '',
+      oid: 0,
+      fields: []
+    }); // Insert user
+        rows: [{
           id: 'user123',
           email: 'test@example.com',
-          is_verified: true
-        }),
-        accessToken: 'mock-access-token'
-      }));
+          name: 'Test User',
+          password_hash: 'hashedPassword',
+          is_verified: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        }]
+      });
       
-      // Verify bcrypt.compare was called with correct arguments
-      expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashedpassword');
+      // Configure JWT sign mock for tokens
+      (jwt.sign as jest.Mock)
+        .mockImplementation((payload, secret, options) => {
+          if (options?.expiresIn === '15m') return 'mock-access-token';
+          if (options?.expiresIn === '7d') return 'mock-refresh-token';
+          return 'mock-token';
+        });
+
+      // Act
+      const next = jest.fn();
+      await authController.login(req as Request, res as unknown as Response, next);
+
+      // Assert
+      expect(res.status).toHaveBeenCalledWith(200);
       
-      // Verify the refresh token cookie was set
+      // Get the response argument from the first call to res.json
+      const responseArg = res.json.mock.calls[0][0];
+      
+      // Verify the response structure
+      expect(responseArg).toHaveProperty('user');
+      expect(responseArg.user).toHaveProperty('id', 'user123');
+      expect(responseArg.user).toHaveProperty('email', 'test@example.com');
+      expect(responseArg.user).toHaveProperty('name', 'Test User');
+      expect(responseArg.user).toHaveProperty('is_verified', true);
+      
+      // Verify tokens are present in the response
+      expect(responseArg).toHaveProperty('accessToken');
+      expect(responseArg).toHaveProperty('refreshToken');
+      expect(responseArg).toHaveProperty('expiresIn', expect.any(Number));
+      expect(responseArg).toHaveProperty('message', 'Login successful');
+      
+      // Verify password comparison was called with correct arguments
+      expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashedPassword');
+      
+      // Verify database was updated with refresh token
+      expect(mockDb.query).toHaveBeenCalledWith(
+        'UPDATE users SET refresh_token_hash = $1, updated_at = NOW() WHERE id = $2',
+        [expect.any(String), 'user123']
+      );
+      
+      // Verify JWT sign was called for access token
+      expect(jwt.sign).toHaveBeenCalledWith(
+        { 
+          userId: 'user123', 
+          email: 'test@example.com',
+          role: 'user',
+          type: 'access'
+        },
+        expect.any(String),
+        { expiresIn: '15m' }
+      );
+      
+      // Verify JWT sign was called for refresh token
+      expect(jwt.sign).toHaveBeenCalledWith(
+        { 
+          userId: 'user123', 
+          email: 'test@example.com',
+          type: 'refresh'
+        },
+        expect.any(String),
+        { expiresIn: '7d' }
+      );
+      
+      // Verify cookies were set
       expect(res.cookie).toHaveBeenCalledWith(
-        'refreshToken', 
-        'mock-refresh-token', 
+        'access_token',
+        expect.any(String),
         expect.objectContaining({
           httpOnly: true,
-          secure: false, // NODE_ENV is 'test'
+          secure: process.env.NODE_ENV === 'production',
           sameSite: 'strict',
-          maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days in milliseconds
+          maxAge: 900000 // 15 minutes in ms
+        })
+      );
+      
+      expect(res.cookie).toHaveBeenCalledWith(
+        'refresh_token',
+        expect.any(String),
+        expect.objectContaining({
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 604800000 // 7 days in ms
+        })
+      );
+      
+      expect(res.cookie).toHaveBeenCalledWith(
+        'authenticated',
+        'true',
+        expect.objectContaining({
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 604800000 // 7 days in ms
         })
       );
     });
 
     it('should return 401 for invalid credentials', async () => {
-      // Mock request body
+      // Arrange
       req.body = {
         email: 'test@example.com',
         password: 'wrongpassword'
       };
 
-      // Mock database response for finding user
-      const mockUser = {
-        id: 'user123',
-        email: 'test@example.com',
-        name: 'Test User',
-        password_hash: 'hashedpassword',
-        is_verified: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-        google_id: null,
-        google_refresh_token: null,
-        verification_token: null,
-        verification_token_expires: null,
-        password_reset_token: null,
-        password_reset_expires: null,
-        refresh_token: null
-      };
-      
-      // Mock database query to return user
-      mockClient.query.mockResolvedValueOnce({ 
-        rows: [mockUser], 
-        rowCount: 1 
+      // Mock database response - user exists
+      mockDb.query.mockResolvedValue({
+        rowCount: 1,
+        rows: [{
+          id: 'user123',
+          email: 'test@example.com',
+          name: 'Test User',
+          password_hash: 'hashedPassword',
+          is_verified: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        }]
       });
 
-      // Mock bcrypt compare to return false (invalid password)
-      bcrypt.compare.mockResolvedValueOnce(false);
+      // Mock bcrypt to return false for password comparison
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      
+      // Reset any previous JWT sign calls
+      (jwt.sign as jest.Mock).mockClear();
 
-      // Call the login function
+      // Act
       const next = jest.fn();
-      await login(req as Request, res as unknown as Response, next);
+      await authController.login(req as Request, res as unknown as Response, next);
 
-      // Assertions for invalid credentials
+      // Assert
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
-        error: 'Invalid email or password'
+        success: false,
+        error: 'The email or password you entered is incorrect. Please try again.'
       });
+      
+      // Verify no tokens were generated
+      expect(jwt.sign).not.toHaveBeenCalled();
     });
   });
 
-  // Add more test suites for other controller methods (verifyEmail, refreshToken, etc.)
-  // ...
+  // Add more test cases for other controller methods...
 });
