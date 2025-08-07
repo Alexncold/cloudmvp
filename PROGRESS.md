@@ -61,6 +61,16 @@
 
 ## 📅 Historial de Cambios
 
+### 2025-08-06
+- Implementadas mejoras en el servicio ONVIF:
+  - Añadido método `getDeviceInfo` para obtener información del dispositivo
+  - Mejorado el manejo de tipos TypeScript
+  - Corregidos problemas de importación de tipos
+  - Implementado manejo de errores robusto
+  - Consolidada lógica duplicada en métodos de heartbeat
+- Actualizadas dependencias del proyecto
+- Mejorada la documentación del código
+
 ### 2025-07-30
 - Configurada y probada conexión a PostgreSQL
 - Configurada y probada conexión a Redis
@@ -75,6 +85,6 @@
 
 ---
 
-**Última actualización:** 2025-07-30 21:40 -03:00
+**Última actualización:** 2025-08-06 22:02 -03:00
 
 > ℹ️ Actualiza este archivo cada vez que se complete una tarea importante o se tomen decisiones relevantes para el proyecto.
