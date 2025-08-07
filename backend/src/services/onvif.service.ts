@@ -10,7 +10,6 @@ import {
   DiscoveredCamera, 
   RTSPUrlInfo, 
   ValidationResult, 
-  HeartbeatResult, 
   CameraCapabilities, 
   SuggestedCredential,
   CameraDiscoveryOptions,
@@ -19,19 +18,75 @@ import {
 
 type OnvifDevice = onvif.Device;
 
+/**
+ * Configuration for a camera manufacturer
+ */
 interface ManufacturerConfig {
+  /** RTSP-specific configuration */
   rtsp?: {
+    /** Common RTSP paths for this manufacturer */
     paths?: string[];
+    /** Common RTSP ports for this manufacturer */
     ports?: number[];
-    credentials?: Array<{username: string; password: string}>;
+    /** Common credentials for this manufacturer */
+    credentials?: Array<{
+      username: string;
+      password: string;
+      /** Authentication type (default: 'basic') */
+      authType?: 'basic' | 'digest';
+      /** Notes about these credentials */
+      notes?: string;
+    }>;
   };
+  
+  /** ONVIF service path (default: '/onvif/device_service') */
+  onvifPath?: string;
+  
+  /** Default HTTP port (if different from 80) */
+  httpPort?: number;
+  
+  /** Default RTSP port (if different from 554) */
+  rtspPort?: number;
+  
+  /** Features supported by this manufacturer's cameras */
+  features?: {
+    /** Whether PTZ is supported */
+    ptz?: boolean;
+    /** Whether audio is supported */
+    audio?: boolean;
+    /** Whether motion detection is supported */
+    motionDetection?: boolean;
+    /** Additional vendor-specific features */
+    [key: string]: boolean | string | number | undefined;
+  };
+  
+  /** Additional manufacturer-specific configuration */
   [key: string]: any;
 }
 
+/**
+ * Result of testing an RTSP URL
+ */
 interface RTSPUrlTestResult {
+  /** The URL that was tested */
   url: string;
+  /** Whether the test was successful */
   success: boolean;
+  /** Error message if the test failed */
   error?: string;
+  /** HTTP status code if available */
+  statusCode?: number;
+  /** Time taken for the test in milliseconds */
+  duration?: number;
+  /** Additional test metadata */
+  metadata?: {
+    /** Whether this URL requires authentication */
+    requiresAuth?: boolean;
+    /** Whether this URL is a snapshot URL */
+    isSnapshot?: boolean;
+    /** Any additional test results */
+    [key: string]: any;
+  };
 }
 
 export class ONVIFService extends EventEmitter {
@@ -42,6 +97,63 @@ export class ONVIFService extends EventEmitter {
   private pingCache = new Map<string, { timestamp: number; result: boolean }>();
   private readonly PING_CACHE_TTL = 30000; // 30 segundos
   private logger = logger; // Add logger as a class property
+
+  /**
+   * Retrieves device information from an ONVIF device
+   * @param device The ONVIF device instance
+   * @returns Device information including manufacturer, model, firmware, and uptime
+   */
+  private async getDeviceInfo(device: onvif.Device): Promise<{
+    manufacturer: string;
+    model: string;
+    firmware: string;
+    uptime?: number;
+  }> {
+    try {
+      // Get basic device information
+      const deviceInfo = await promisify(device.getDeviceInformation).call(device);
+      
+      // Get system date and time for uptime calculation if supported
+      let uptime: number | undefined;
+      try {
+        const systemDate = await promisify(device.getSystemDateAndTime).call(device);
+        if (systemDate && systemDate.UTCDateTime) {
+          const now = new Date();
+          const deviceTime = new Date(
+            systemDate.UTCDateTime.date.year,
+            (systemDate.UTCDateTime.date.month || 1) - 1,
+            systemDate.UTCDateTime.date.day || 1,
+            systemDate.UTCDateTime.time.hour || 0,
+            systemDate.UTCDateTime.time.minute || 0,
+            systemDate.UTCDateTime.time.second || 0
+          );
+          
+          // Calculate uptime in seconds (this is an approximation)
+          uptime = Math.floor((now.getTime() - deviceTime.getTime()) / 1000);
+        }
+      } catch (error) {
+        this.logger.debug('Could not get system date/time from device', { 
+          error: error instanceof Error ? error.message : String(error) 
+        });
+      }
+      
+      return {
+        manufacturer: deviceInfo.manufacturer || 'Unknown',
+        model: deviceInfo.model || 'Unknown',
+        firmware: deviceInfo.firmwareVersion || 'Unknown',
+        uptime
+      };
+    } catch (error) {
+      this.logger.warn('Failed to get device information', { 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+      return {
+        manufacturer: 'Unknown',
+        model: 'Unknown',
+        firmware: 'Unknown'
+      };
+    }
+  }
 
   constructor() {
     super();
@@ -360,16 +472,42 @@ export class ONVIFService extends EventEmitter {
 
       // Check for PTZ capabilities
       try {
-        const ptzStatus = await new Promise<any>((resolve, reject) => {
-          device.getStatus({ ProfileToken: 'Profile_1' }, (err, data) => {
-            if (err) reject(err);
-            else resolve(data);
+        type PTZPosition = {
+          x?: number;
+          y?: number;
+          z?: number;
+          zoom?: number;
+          focus?: number;
+          iris?: number;
+          pan?: number;
+          tilt?: number;
+          [key: string]: unknown;
+        };
+
+        interface PTZStatus {
+          position?: PTZPosition;
+          moveStatus?: {
+            panTilt?: string;
+            zoom?: string;
+            [key: string]: unknown;
+          };
+          [key: string]: unknown;
+        }
+
+        const ptzStatus = await new Promise<PTZStatus>((resolve) => {
+          device.getStatus({ ProfileToken: 'Profile_1' }, (err: Error | null, data?: unknown) => {
+            if (err) {
+              this.logger.debug(`PTZ status check failed: ${err.message}`, { error: err });
+              resolve({});
+            } else {
+              resolve((data as PTZStatus) || {});
+            }
           });
         });
         
         if (ptzStatus?.position) {
           baseCapabilities.hasPTZ = true;
-          const position = ptzStatus.position as Record<string, unknown>;
+          const position = ptzStatus.position;
           
           // Check for specific PTZ capabilities
           baseCapabilities.hasZoom = 'zoom' in position;
@@ -466,14 +604,28 @@ export class ONVIFService extends EventEmitter {
 
       // Check for motion detection and analytics
       try {
-        const analytics = await new Promise<any[]>((resolve, reject) => {
-          device.getAnalyticsConfigurations((err, data) => {
-            if (err) reject(err);
-            else resolve(data);
+        interface AnalyticsConfiguration {
+          AnalyticsEngineConfiguration?: {
+            MotionRegionDetection?: any;
+            [key: string]: any;
+          };
+          [key: string]: any;
+        }
+
+        const analytics = await new Promise<AnalyticsConfiguration[]>((resolve, reject) => {
+          device.getAnalyticsConfigurations((err: Error | null, data?: any) => {
+            if (err) {
+              this.logger.debug('Failed to get analytics configurations', { 
+                error: err.message 
+              });
+              resolve([]);
+            } else {
+              resolve(Array.isArray(data) ? data : []);
+            }
           });
         });
 
-        if (Array.isArray(analytics) && analytics.length > 0) {
+        if (analytics.length > 0) {
           baseCapabilities.hasMotionDetection = analytics.some(
             (config) => config?.AnalyticsEngineConfiguration?.MotionRegionDetection !== undefined
           );
@@ -809,10 +961,61 @@ export class ONVIFService extends EventEmitter {
     }
   }
 
+/**
+ * Result of a camera heartbeat check
+ */
+interface HeartbeatResult {
+  /** Camera ID */
+  cameraId: string;
+  /** Overall status (true if both ping and ONVIF are working) */
+  overall: boolean;
+  /** Whether the camera responded to ping */
+  ping: boolean;
+  /** Whether ONVIF communication is working */
+  onvif: boolean;
+  /** Whether RTSP stream is accessible */
+  rtsp: boolean;
+  /** When the heartbeat was performed */
+  timestamp: Date;
+  /** When the camera was last seen */
+  lastSeen: Date;
+  /** Camera uptime in seconds, if available */
+  uptime?: number;
+  /** Additional details about the heartbeat result */
+  details: {
+    /** Error details for ping check */
+    pingError?: string;
+    /** Error details for ONVIF check */
+    onvifError?: string;
+    /** Error details for RTSP check */
+    rtspError?: string;
+    /** Device information if ONVIF check succeeded */
+    deviceInfo?: {
+      manufacturer: string;
+      model: string;
+      firmware: string;
+      uptime?: number;
+    };
+    /** List of available RTSP URLs if RTSP check succeeded */
+    rtspUrls?: Array<{
+      url: string;
+      streamType: 'main' | 'sub' | 'mobile';
+      resolution: string;
+      tested: boolean;
+      source: string;
+    }>;
+    /** Any additional error information */
+    error?: string;
+    [key: string]: any;
+  };
+}
+
   /**
-   * Realiza un heartbeat para verificar el estado de una cámara
+   * Performs a heartbeat check on a camera to verify its status
+   * @param camera Camera configuration
+   * @returns Heartbeat result with detailed status information
    */
-  public async performHeartbeat(camera: Camera & { password_encrypted?: string }): Promise<HeartbeatResult> {
+  public async performHeartbeat(camera: Camera & { password_encrypted?: string; manufacturer?: string }): Promise<HeartbeatResult> {
     const result: HeartbeatResult = {
       cameraId: camera.id,
       overall: false,
@@ -820,28 +1023,46 @@ export class ONVIFService extends EventEmitter {
       onvif: false,
       rtsp: false,
       timestamp: new Date(),
-      details: {}
+      details: {},
+      lastSeen: new Date()
     };
 
     try {
-      // 1. Verificar ping
+      // 1. Check basic connectivity with ping
       result.ping = await this.pingCamera(camera.ipAddress);
       
       if (!result.ping) {
-        this.logger.warn(`Cámara inalcanzable por ping`, { cameraId: camera.id });
+        this.logger.warn(`Camera not reachable by ping`, { cameraId: camera.id });
+        result.details.pingError = 'Device not reachable';
         return result;
       }
       
-      // 2. Verificar ONVIF
-      try {
-        const password = camera.password_encrypted ? await this.encryptionService.decrypt(camera.password_encrypted) : '';
-        const device = new this.onvifManager.OnvifDevice({
-          xaddr: `http://${camera.ipAddress}:${camera.port}/onvif/device_service`,
-          user: camera.username,
-          pass: password
-        });
-        
-        await this.getDeviceInfo(device);
+      // 2. Check ONVIF service if credentials are available
+      if (camera.username) {
+        try {
+          const password = camera.password_encrypted 
+            ? await this.encryptionService.decrypt(camera.password_encrypted) 
+            : '';
+            
+          const device = await this.createOnvifClient({
+            ipAddress: camera.ipAddress,
+            port: camera.port || 80,
+            username: camera.username,
+            password,
+            manufacturer: camera.manufacturer
+          });
+          
+          // Verify ONVIF is working by getting device info
+          const deviceInfo = await this.getDeviceInfo(device);
+          result.onvif = true;
+          
+          // Include device info in details
+          if (deviceInfo) {
+            result.details.deviceInfo = deviceInfo;
+            if (deviceInfo.uptime) {
+              result.uptime = deviceInfo.uptime;
+            }
+          }
         result.onvif = true;
       } catch (error) {
         this.logger.warn(`Fallo en conexión ONVIF`, { 
@@ -1097,17 +1318,6 @@ export class ONVIFService extends EventEmitter {
    * @param camera Camera object with connection details
    * @returns Promise with the heartbeat result
    */
-  /**
-   * Performs a heartbeat check on a camera
-   * @param camera Camera configuration
-   * @returns Heartbeat result with status information
-   */
-  public async performHeartbeat(camera: Camera): Promise<HeartbeatResult> {
-    const result: HeartbeatResult = {
-      cameraId: camera.id,
-      overall: false,
-      ping: false,
-      onvif: false,
       rtsp: false,
       timestamp: new Date(),
       details: {}

@@ -1,57 +1,133 @@
+// Type definitions for node-onvif
+// Project: https://github.com/futomi/node-onvif
+// Definitions by: CloudCam Team <https://github.com/Alexncold/cloudmvp>
+
 declare module 'node-onvif' {
   export interface DeviceOptions {
+    /** The XAddr of the device (e.g., 'http://192.168.1.100/onvif/device_service') */
     xaddr?: string;
+    /** @deprecated Use username instead */
     user?: string;
+    /** @deprecated Use password instead */
     pass?: string;
+    /** Port number for the ONVIF service (default: 80) */
     port?: number;
+    /** Connection timeout in milliseconds (default: 10000) */
     timeout?: number;
+    /** Hostname or IP address of the camera */
     hostname?: string;
+    /** Username for authentication */
     username?: string;
+    /** Password for authentication */
     password?: string;
   }
 
   export interface DeviceInfo {
+    /** Manufacturer of the device (e.g., 'Hikvision', 'Dahua') */
     manufacturer: string;
+    /** Model name of the device */
     model: string;
+    /** Firmware version */
     firmware: string;
+    /** Serial number of the device */
     serial: string;
+    /** Hardware version */
     hardware: string;
+    /** Additional metadata */
+    [key: string]: any;
+  }
+
+  export interface NetworkAddress {
+    /** IP address */
+    address: string;
+    /** Network prefix length (e.g., 24 for 255.255.255.0) */
+    prefix: number;
+    /** Address type (IPv4/IPv6) */
+    type?: 'IPv4' | 'IPv6';
   }
 
   export interface NetworkInterface {
+    /** Interface name (e.g., 'eth0', 'wlan0') */
     name: string;
+    /** Hardware (MAC) address */
     hwaddr: string;
+    /** Maximum Transmission Unit */
     mtu: number;
-    addresses: {
-      address: string;
-      prefix: number;
-    }[];
+    /** List of network addresses */
+    addresses: NetworkAddress[];
+    /** Interface status (up/down) */
+    up?: boolean;
   }
 
   export interface PTZNode {
+    /** Name of the PTZ node */
     Name: string;
+    /** Token that uniquely identifies the node */
+    token: string;
+    /** Supported PTZ capabilities */
+    supportedPTZSpaces?: {
+      absolutePanTiltPositionSpace?: any[];
+      absoluteZoomPositionSpace?: any[];
+      relativePanTiltTranslationSpace?: any[];
+      relativeZoomTranslationSpace?: any[];
+      continuousPanTiltVelocitySpace?: any[];
+      continuousZoomVelocitySpace?: any[];
+      panTiltSpeedSpace?: any[];
+      zoomSpeedSpace?: any[];
+    };
+    /** Maximum number of presets */
+    maximumNumberOfPresets?: number;
+    /** Home position support */
+    homeSupported?: boolean;
+    /** Additional properties */
     [key: string]: any;
   }
 
   export interface PTZPreset {
+    /** Unique identifier for the preset */
     token: string;
+    /** User-defined name for the preset */
     name: string;
+    /** Optional description of the preset */
+    description?: string;
+    /** Optional position information */
+    position?: {
+      pan?: number;
+      tilt?: number;
+      zoom?: number;
+      [key: string]: any;
+    };
+    /** Additional properties */
     [key: string]: any;
   }
 
+  export interface Resolution {
+    /** Frame width in pixels */
+    Width: number;
+    /** Frame height in pixels */
+    Height: number;
+    /** Frame rate in frames per second */
+    FrameRate?: number;
+  }
+
   export interface VideoSource {
+    /** Unique identifier for the video source */
     token: string;
+    /** Video source configuration */
     $: {
       token: string;
+      /** Frame rate as a string (e.g., '30.0') */
       Framerate: string;
-      Resolution: {
-        Width: number;
-        Height: number;
-      };
+      /** Video resolution */
+      Resolution: Resolution;
+      /** Day/night mode */
       DayNight?: string;
+      /** Infrared cut filter status */
       InfraredCutFilter?: string;
+      /** Additional properties */
       [key: string]: any;
     };
+    /** Additional properties */
     [key: string]: any;
   }
 
@@ -98,6 +174,7 @@ declare module 'node-onvif' {
     getCompatibleVideoEncoderConfigurations(profileToken: string): Promise<any>;
     getCompatiblePTZConfigurations(profileToken: string): Promise<any>;
     getAnalyticsModules(): Promise<any>;
+    getAnalyticsConfigurations(callback: (err: Error | null, data: any) => void): void;
     getEventProperties(): Promise<EventProperties>;
     getNodes(): Promise<PTZNode[]>;
     getPresets(): Promise<PTZPreset[]>;

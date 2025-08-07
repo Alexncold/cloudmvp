@@ -1,4 +1,4 @@
-import { Logger } from '../utils/logger';
+import { logger } from '../utils/logger';
 
 export interface CommonCredential {
   username: string;
@@ -131,22 +131,23 @@ export class CameraConfigDatabase {
     }
   };
 
-  private logger: Logger;
+  private logger: ReturnType<typeof logger.child>;
 
   constructor() {
-    this.logger = new Logger('CameraConfigDatabase');
+    this.logger = logger.child({ service: 'CameraConfigDatabase' });
   }
 
   getManufacturerConfig(manufacturer: string): ManufacturerConfig {
     if (!manufacturer) {
       this.logger.warn('No manufacturer provided, using generic config');
-      return this.MANUFACTURER_CONFIGS['generic'];
+      return CameraConfigDatabase.MANUFACTURER_CONFIGS['generic'];
     }
     
     const normalized = manufacturer.toLowerCase();
-    const config = this.MANUFACTURER_CONFIGS[normalized] || this.MANUFACTURER_CONFIGS['generic'];
+    const config = CameraConfigDatabase.MANUFACTURER_CONFIGS[normalized] || 
+                  CameraConfigDatabase.MANUFACTURER_CONFIGS['generic'];
     
-    if (normalized !== 'generic' && config === this.MANUFACTURER_CONFIGS['generic']) {
+    if (normalized !== 'generic' && config === CameraConfigDatabase.MANUFACTURER_CONFIGS['generic']) {
       this.logger.debug(`No specific config found for manufacturer: ${manufacturer}, using generic config`);
     }
     
@@ -154,7 +155,7 @@ export class CameraConfigDatabase {
   }
 
   getAllSupportedManufacturers(): string[] {
-    return Object.keys(this.MANUFACTURER_CONFIGS).filter(key => key !== 'generic');
+    return Object.keys(CameraConfigDatabase.MANUFACTURER_CONFIGS).filter(key => key !== 'generic');
   }
 
   getCommonCredentials(): CommonCredential[] {
