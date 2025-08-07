@@ -7,14 +7,14 @@ WORKDIR /app
 # Copiar archivos de configuración
 COPY package*.json ./
 COPY tsconfig*.json ./
+COPY ../tsconfig.base.json ./
 
-# Instalar dependencias de construcción
-RUN npm ci --only=production
+# Instalar dependencias de desarrollo para la compilación
+RUN npm ci --include=dev
 
-# Copiar código fuente
+# Copiar código fuente y archivos compartidos
 COPY src/ ./src/
-# Comentado temporalmente ya que compartimos este directorio como volumen en docker-compose.yml
-# COPY shared/ ./shared/
+COPY ../shared/ ./shared/
 
 # Compilar TypeScript
 RUN npm run build

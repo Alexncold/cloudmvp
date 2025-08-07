@@ -1,25 +1,85 @@
-import { Request, Response, NextFunction } from 'express';
 import { AuthController } from '../../../src/controllers/authController';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { PoolClient } from 'pg';
-import { db } from '../../../src/services/database';
+import { Pool, PoolClient } from 'pg';
+import { createMockRequest, createMockResponse, mockDb } from '../../test-utils/testMocks';
 
-// Create a properly typed mock for the database
-const mockQuery = jest.fn<Promise<QueryResult>, [string, any[]?]>();
+// Import types from pg
+import { QueryResult, QueryResultRow } from 'pg';
+
+// Create a type for the query function that matches the database service
+type QueryFunction = {
+  <T extends QueryResultRow = any>(text: string, params?: any[]): Promise<QueryResult<T>>;
+} & {
+  mockResolvedValueOnce: <T>(value: QueryResult<T>) => QueryFunction;
+  mockRejectedValueOnce: (error: any) => QueryFunction;
+  mockResolvedValue: <T>(value: QueryResult<T>) => QueryFunction;
+  mockReset: () => void;
+};
+
+// Create a mock implementation with proper Jest mock functions
+const createMockQuery = (): QueryFunction => {
+  // Create a base mock function with the correct call signature
+  const baseMock = <T extends QueryResultRow = any>(
+    text: string, 
+    params?: any[]
+  ): Promise<QueryResult<T>> => {
+    return Promise.resolve({} as QueryResult<T>);
+  };
+  
+  // Cast to any to allow adding Jest mock properties
+  const mockFn = baseMock as any;
+  
+  // Add Jest mock methods with proper typing
+  mockFn.mockResolvedValueOnce = <T>(value: QueryResult<T>) => {
+    mockFn.mockImplementationOnce(() => Promise.resolve(value));
+    return mockFn;
+  };
+  
+  mockFn.mockRejectedValueOnce = (error: any) => {
+    mockFn.mockImplementationOnce(() => Promise.reject(error));
+    return mockFn;
+  };
+  
+  mockFn.mockResolvedValue = <T>(value: QueryResult<T>) => {
+    mockFn.mockImplementation(() => Promise.resolve(value));
+    return mockFn;
+  };
+  
+  mockFn.mockReset = () => {
+    mockFn.mockClear();
+  };
+  
+  // Initialize with a default implementation
+  mockFn.mockImplementation(<T>() => Promise.resolve({} as QueryResult<T>));
+  
+  return mockFn as unknown as QueryFunction;
+};
+
+// Create mock functions with proper types
+const mockQuery = createMockQuery();
 const mockGetClient = jest.fn<Promise<PoolClient>, []>();
 const mockClose = jest.fn<Promise<void>, []>();
 const mockConnect = jest.fn<Promise<void>, []>();
 
+// Create a mock database object that matches the Database class interface
+const mockDb = {
+  query: mockQuery,
+  getClient: mockGetClient,
+  close: mockClose,
+  connect: mockConnect
+};
+
 // Mock the database module
 jest.mock('../../../src/services/database', () => ({
-  db: {
-    query: mockQuery,
-    getClient: mockGetClient,
-    close: mockClose,
-    connect: mockConnect
-  }
+  db: mockDb
 }));
+
+// Import the mocked db after setting up the mock
+import { db } from '../../../src/services/database';
+
+// Export mocks for convenience
+export { mockQuery, mockGetClient, mockClose, mockConnect, mockDb };
 
 // Create a mock PoolClient
 const mockPoolClient: Partial<PoolClient> = {
@@ -37,6 +97,10 @@ beforeEach(() => {
   mockGetClient.mockResolvedValue(mockPoolClient as PoolClient);
   mockClose.mockResolvedValue(undefined);
   mockConnect.mockResolvedValue(undefined);
+  
+  // Set up mock implementations for PoolClient
+  (mockPoolClient.query as jest.Mock).mockResolvedValue({ rows: [], rowCount: 0, command: '', oid: 0, fields: [] });
+  (mockPoolClient.release as jest.Mock).mockResolvedValue(undefined);
   
   // Set up other mocks
   (jwt.sign as jest.Mock).mockReturnValue('mocked-jwt-token');
@@ -335,7 +399,7 @@ describe('Auth Controller', () => {
       };
 
       // Mock database response - user already exists
-      mockDb.query.mockResolvedValueOnce({
+      db.query.mockResolvedValueOnce({
         rowCount: 1,
         rows: [{
           id: 'existing-user-123',
@@ -368,7 +432,7 @@ describe('Auth Controller', () => {
       };
 
       // Mock database to throw an error
-      mockDb.query.mockRejectedValueOnce(new Error('Database error'));
+      db.query.mockRejectedValueOnce(new Error('Database error'));
 
       // Act
       await authController.register(req as Request, res as unknown as Response, jest.fn());
@@ -386,18 +450,18 @@ describe('Auth Controller', () => {
   describe('login', () => {
     it('should login user with valid credentials', async () => {
       // Arrange
-      const testReq = {
+      const req = {
         body: {
           email: 'test@example.com',
           password: 'password123'
         }
-      };
+      } as Request;
       
-      const testRes = mockResponse();
+      const res = mockResponse();
       const next = jest.fn();
 
       // Mock database response - user exists with hashed password
-      mockQuery.mockResolvedValue({
+      mockQuery.mockResolvedValueOnce({
         rowCount: 1,
         rows: [{
           id: 'user123',
@@ -424,12 +488,12 @@ describe('Auth Controller', () => {
       });
 
       // Act
-      await authController.login(testReq as Request, testRes as unknown as Response, next);
+      await authController.login(req as Request, res as unknown as Response, next);
 
       // Assert
-      expect(testRes.status).toHaveBeenCalledWith(200);
+      expect(res.status).toHaveBeenCalledWith(200);
 
-      const responseArg = testRes.json.mock.calls[0][0];
+      const responseArg = res.json.mock.calls[0][0];
       expect(responseArg).toHaveProperty('accessToken', 'mock-access-token');
       expect(responseArg).toHaveProperty('refreshToken', 'mock-refresh-token');
       expect(responseArg).toHaveProperty('expiresIn', 900); // 15 minutes in seconds
@@ -445,65 +509,51 @@ describe('Auth Controller', () => {
       expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashedPassword');
 
       // Verify JWT sign was called with correct parameters
-      
-      // Verify JWT sign was called
       expect(jwt.sign).toHaveBeenCalledWith(
         { userId: expect.any(String), email: 'test@example.com' },
         expect.any(String),
         { expiresIn: '15m' }
       );
       
-        email: 'test@example.com',
-        password: 'password123',
-        name: 'Test User'
-      }
-    }) as Request;
-    const res = mockResponse();
-    const next = jest.fn();
+      // Verify email was sent
+      expect(emailService.sendVerificationEmail).toHaveBeenCalledWith(
+        'test@example.com',
+        expect.any(String) // verification token
+      );
+    });
 
-    // Mock database responses
-    mockQuery.mockResolvedValueOnce({ 
-      rowCount: 0,
-      rows: [],
-      command: '',
-      oid: 0,
-      fields: []
-    }); // User doesn't exist
-    
-    mockQuery.mockResolvedValueOnce({ 
-      rowCount: 1,
-      rows: [{ 
-        id: 'user123', 
-        email: 'test@example.com', 
-        name: 'Test User', 
-        is_verified: false 
-      }],
-      command: '',
-      oid: 0,
-      fields: []
-    }); // Insert user
+    it('should return 400 if user already exists', async () => {
+      // Arrange
+      const testReq = {
+        body: {
+          email: 'existing@example.com',
+          password: 'password123',
+          name: 'Existing User'
+        }
+      } as Request;
+      
+      const testRes = mockResponse();
+      const next = jest.fn();
+
+      // Mock database response - user already exists
+      mockQuery.mockResolvedValueOnce({
+        rowCount: 1,
         rows: [{
-          id: 'user123',
-          email: 'test@example.com',
-          name: 'Test User',
-          password_hash: 'hashedPassword',
+          id: 'existing-user-123',
+          email: 'existing@example.com',
+          name: 'Existing User',
+          password_hash: 'existing-hash',
           is_verified: true,
           created_at: new Date(),
           updated_at: new Date()
-        }]
+        }],
+        command: 'SELECT',
+        oid: 0,
+        fields: []
       });
-      
-      // Configure JWT sign mock for tokens
-      (jwt.sign as jest.Mock)
-        .mockImplementation((payload, secret, options) => {
-          if (options?.expiresIn === '15m') return 'mock-access-token';
-          if (options?.expiresIn === '7d') return 'mock-refresh-token';
-          return 'mock-token';
-        });
 
       // Act
-      const next = jest.fn();
-      await authController.login(req as Request, res as unknown as Response, next);
+      await authController.login(testReq as Request, testRes as unknown as Response, next);
 
       // Assert
       expect(res.status).toHaveBeenCalledWith(200);
@@ -528,7 +578,7 @@ describe('Auth Controller', () => {
       expect(bcrypt.compare).toHaveBeenCalledWith('password123', 'hashedPassword');
       
       // Verify database was updated with refresh token
-      expect(mockDb.query).toHaveBeenCalledWith(
+      expect(db.query).toHaveBeenCalledWith(
         'UPDATE users SET refresh_token_hash = $1, updated_at = NOW() WHERE id = $2',
         [expect.any(String), 'user123']
       );
@@ -598,7 +648,7 @@ describe('Auth Controller', () => {
       };
 
       // Mock database response - user exists
-      mockDb.query.mockResolvedValue({
+      db.query.mockResolvedValue({
         rowCount: 1,
         rows: [{
           id: 'user123',

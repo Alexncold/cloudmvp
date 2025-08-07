@@ -1,4 +1,4 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { logger } from '../utils/logger';
 import fs from 'fs';
 import path from 'path';
@@ -109,7 +109,11 @@ class DatabaseService {
     });
   }
 
-  async query(text: string, params: any[] = [], timeout = 10000) {
+  async query<T extends QueryResultRow = any>(
+    text: string, 
+    params: any[] = [], 
+    timeout = 10000
+  ): Promise<{ rows: T[]; rowCount: number }> {
     if (!this.isConnected) {
       throw new Error('Database is not connected');
     }
@@ -121,10 +125,10 @@ class DatabaseService {
       // Set statement timeout for this transaction
       await client.query(`SET LOCAL statement_timeout = ${timeout}`);
       
-      const res = await client.query({
+      // Usar QueryResult para tipar correctamente la respuesta
+      const result = await client.query<T>({
         text,
         values: params,
-        rowMode: 'array',
       });
       
       const duration = Date.now() - start;
@@ -138,7 +142,10 @@ class DatabaseService {
         });
       }
       
-      return res;
+      return {
+        rows: result.rows,
+        rowCount: result.rowCount || 0,
+      };
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown database error';
       const errorDetails = {

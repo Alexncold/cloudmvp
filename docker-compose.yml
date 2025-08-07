@@ -86,8 +86,8 @@ services:
   # Backend API
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile.api
     container_name: cloudcam_api
     restart: unless-stopped
     depends_on:

@@ -6,7 +6,7 @@ import { Request } from 'express';
 
 type SecurityEventType = 
   | 'login_success'
-  | 'login_failed'
+  | 'login_failure'
   | 'account_locked'
   | 'password_reset'
   | 'user_created'
@@ -14,7 +14,13 @@ type SecurityEventType =
   | 'user_deleted'
   | 'role_changed'
   | 'unauthorized_access'
-  | 'suspicious_activity';
+  | 'suspicious_activity'
+  | 'token_revoked'
+  | 'token_refreshed'
+  | 'password_changed'
+  | 'account_created'
+  | 'account_deleted'
+  | 'user_action';
 
 interface SecurityEvent {
   type: SecurityEventType;
@@ -102,57 +108,18 @@ class SecurityLogger {
     this.isInitialized = true;
   }
 
-  private logEvent(event: SecurityEvent): void {
+  public logEvent(event: SecurityEvent): void {
     if (!this.isInitialized) {
       this.initializeLogger();
     }
 
-    const { type, userId, ipAddress, userAgent, metadata } = event;
-    const logEntry = {
-      type,
-      userId,
-      ipAddress,
-      userAgent,
-      metadata,
-      timestamp: new Date().toISOString()
+    const logData = {
+      ...event,
+      timestamp: event.timestamp || new Date(),
+      metadata: event.metadata || {}
     };
 
-    // Determinar el nivel de log basado en el tipo de evento
-    let level: string;
-    let message: string;
-
-    switch (type) {
-      case 'login_success':
-        level = 'info';
-        message = `Inicio de sesión exitoso para el usuario ${userId}`;
-        break;
-      case 'login_failed':
-        level = 'warn';
-        message = `Intento de inicio de sesión fallido para el usuario ${userId || 'desconocido'}`;
-        break;
-      case 'account_locked':
-        level = 'warn';
-        message = `Cuenta bloqueada para el usuario ${userId} debido a múltiples intentos fallidos`;
-        break;
-      case 'unauthorized_access':
-      case 'suspicious_activity':
-        level = 'error';
-        message = `Actividad sospechosa detectada: ${type}`;
-        break;
-      default:
-        level = 'info';
-        message = `Evento de seguridad: ${type}`;
-    }
-
-    // Registrar el evento
-    this.logger.log({
-      level,
-      message,
-      ...logEntry
-    });
-
-    // También registrar en el logger principal
-    logger[level](message, logEntry);
+    this.logger.info(logData);
   }
 
   // Métodos específicos para diferentes tipos de eventos de seguridad
@@ -160,8 +127,8 @@ class SecurityLogger {
     this.logEvent({
       type: 'login_success',
       userId,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent'),
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
         path: req.path,
         method: req.method
@@ -171,11 +138,12 @@ class SecurityLogger {
 
   public logLoginFailure(identifier: string, req: Request, error: string): void {
     this.logEvent({
-      type: 'login_failed',
-      userId: identifier,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agen'),
+      type: 'login_failure',
+      userId: undefined,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
+        identifier,
         path: req.path,
         method: req.method,
         error
@@ -187,8 +155,8 @@ class SecurityLogger {
     this.logEvent({
       type: 'account_locked',
       userId,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent'),
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
         path: req.path,
         method: req.method
@@ -199,25 +167,27 @@ class SecurityLogger {
   public logUnauthorizedAccess(req: Request, reason: string): void {
     this.logEvent({
       type: 'unauthorized_access',
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent'),
+      userId: undefined,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
         path: req.path,
         method: req.method,
         reason,
         headers: {
-          'x-forwarded-for': req.headers['x-forwarded-for'],
-          'user-agent': req.headers['user-agent']
+          'x-forwarded-for': req.headers['x-forwarded-for'] || 'unknown',
+          'user-agent': req.headers['user-agent'] || 'unknown'
         }
       }
     });
   }
 
-  public logSuspiciousActivity(req: Request, details: Record<string, any>): void {
+  public logSuspiciousActivity(req: Request, details: Record<string, any> = {}): void {
     this.logEvent({
       type: 'suspicious_activity',
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent'),
+      userId: undefined,
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
         path: req.path,
         method: req.method,
@@ -226,12 +196,12 @@ class SecurityLogger {
     });
   }
 
-  public logUserAction(userId: string, action: string, req: Request, details?: Record<string, any>): void {
+  public logUserAction(userId: string, action: string, req: Request, details: Record<string, any> = {}): void {
     this.logEvent({
-      type: 'user_action', // Este tipo no está definido en SecurityEventType, deberías agregarlo
+      type: 'user_action',
       userId,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent'),
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.get('user-agent') || 'unknown',
       metadata: {
         action,
         path: req.path,
