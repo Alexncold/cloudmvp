@@ -1,0 +1,21 @@
+# Ignorar todo por defecto
+**
+
+# Incluir solo lo necesario
+!backend/package*.json
+!backend/tsconfig*.json
+!backend/src/**
+!shared/**
+!tsconfig.base.json
+
+# Excluir directorios innecesarios
+**/node_modules
+**/dist
+**/.git
+**/.github
+**/test
+**/__tests__
+**/__mocks__
+**/*.md
+**/*.log
+**/.DS_Store
