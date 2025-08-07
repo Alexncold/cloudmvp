@@ -68,10 +68,13 @@ export class TokenBlacklist {
         expiresAt: new Date(expiry).toISOString()
       });
       
-    } catch (error) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const stack = error instanceof Error ? error.stack : undefined;
+      
       logger.error('Failed to add token to blacklist', { 
-        error: error.message,
-        stack: error.stack
+        error: errorMessage,
+        stack
       });
     }
   }
@@ -99,11 +102,14 @@ export class TokenBlacklist {
       // Token is blacklisted and not expired
       return true;
       
-    } catch (error) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const stack = error instanceof Error ? error.stack : undefined;
+      
       logger.error('Failed to check token blacklist status', {
         token: token ? token.substring(0, 10) + '...' : 'undefined',
-        error: error.message,
-        stack: error.stack
+        error: errorMessage,
+        stack
       });
       
       // In case of error, assume token is not blacklisted
@@ -133,10 +139,13 @@ export class TokenBlacklist {
         });
       }
       
-    } catch (error) {
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const stack = error instanceof Error ? error.stack : undefined;
+      
       logger.error('Failed to clean up token blacklist', {
-        error: error.message,
-        stack: error.stack
+        error: errorMessage,
+        stack
       });
     }
   }
