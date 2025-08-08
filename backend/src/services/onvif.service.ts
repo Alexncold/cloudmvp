@@ -1431,6 +1431,14 @@ export class ONVIFService extends EventEmitter {
    * @param source Source of the RTSP URL ('auto-detected', 'manual', 'discovered', 'user-defined', or stream type)
    * @param streamType Optional explicit stream type ('main', 'sub', 'mobile')
    */
+  /**
+   * Tests an RTSP URL and adds it to the list if it's reachable
+   * @param rtspUrls Array of RTSP URL information
+   * @param hostname Camera hostname or IP address
+   * @param path RTSP path to test
+   * @param source Source of the RTSP URL ('auto-detected', 'manufacturer', 'common', or 'user-provided')
+   * @param streamType Optional explicit stream type ('main', 'sub', 'mobile')
+   */
   private async testAndAddRTSPUrl(
     rtspUrls: RTSPUrlInfo[],
     hostname: string,
@@ -1443,6 +1451,15 @@ export class ONVIFService extends EventEmitter {
       return;
     }
 
+    // Map stream type strings to valid RTSPUrlInfo['source'] values
+    const streamTypeToSource: Record<string, RTSPUrlInfo['source']> = {
+      'main': 'manufacturer',
+      'sub': 'manufacturer',
+      'mobile': 'manufacturer',
+      'snapshot': 'manufacturer',
+      'event': 'manufacturer'
+    };
+
     // Determine the final stream type (default to 'main' if not specified)
     const streamTypes = ['main', 'sub', 'mobile', 'snapshot', 'event'] as const;
     const finalStreamType: RTSPUrlInfo['streamType'] = streamType || 
@@ -1452,8 +1469,8 @@ export class ONVIFService extends EventEmitter {
     const validSources = ['manufacturer', 'common', 'auto-detected', 'user-provided'] as const;
     const sourceStr = String(source);
     const normalizedSource = validSources.includes(sourceStr as any) 
-      ? sourceStr as RTSPUrlInfo['source'] 
-      : 'auto-detected';
+      ? sourceStr as RTSPUrlInfo['source']
+      : streamTypeToSource[sourceStr] || 'auto-detected';
     
     // Clean up the path (ensure it starts with /)
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
@@ -1479,12 +1496,12 @@ export class ONVIFService extends EventEmitter {
         resolution: 'auto-detect',
         confidence: isReachable ? 0.9 : 0.1, // Higher confidence if reachable
         tested: true,
-        source: normalizedSource,
+        source: normalizedSource, // Now properly typed as RTSPUrlInfo['source']
         // Optional properties with default values
         authType: 'none',
         bitrate: 0,
         framerate: 0,
-        codec: 'H.264' as VideoCodec
+        codec: 'H.264' as const
       };
       
       if (isReachable) {
@@ -1520,198 +1537,6 @@ export class ONVIFService extends EventEmitter {
         bitrate: 0,
         framerate: 0
       });
-    }
-  }
-
-  /**
-    rtsp: boolean;
-    lastSeen: Date;
-    timestamp: Date;
-    details: Record<string, unknown>;
-    error?: string;
-  }> {
-    const { ipAddress, port = 80, username, password, manufacturer } = camera;
-    const timestamp = new Date();
-    
-    const result = {
-      isOnline: false,
-      ping: false,
-      onvif: false,
-      rtsp: false,
-      lastSeen: timestamp,
-      timestamp,
-      details: {}
-    };
-
-    try {
-      // 1. Test basic ping
-      result.ping = await this.pingCamera(ipAddress);
-      
-      // 2. Test ONVIF connection if ping was successful
-      if (result.ping) {
-        try {
-          const device = await this.createOnvifClient({
-            ipAddress,
-            port,
-            username: username || '',
-            password: password || '',
-            manufacturer
-          });
-          
-          // Get device info
-          const deviceInfo = await this.getDeviceInfo(device);
-          result.onvif = true;
-          
-          // Update details with device information
-          result.details = {
-            ...result.details,
-            deviceInfo
-          };
-          
-          // 3. Test RTSP if ONVIF was successful
-          try {
-            const rtspUrls = await this.detectRTSPUrls(device);
-            if (rtspUrls.length > 0) {
-              result.rtsp = true;
-              result.details = {
-                ...result.details,
-                rtspUrls: rtspUrls.map(url => ({
-                  url: url.url,
-                  streamType: url.streamType,
-                  resolution: url.resolution || 'unknown',
-                  tested: url.tested || false,
-                  source: url.source || 'auto-detected'
-                }))
-              };
-            }
-          } catch (rtspError) {
-            result.details = {
-              ...result.details,
-              rtspError: rtspError instanceof Error ? rtspError.message : 'Unknown RTSP error'
-            };
-          }
-          
-        } catch (onvifError) {
-          result.details = {
-            ...result.details,
-            onvifError: onvifError instanceof Error ? onvifError.message : 'Unknown ONVIF error'
-          };
-        }
-      } else {
-        result.details = {
-          ...result.details,
-          pingError: 'Could not ping the device'
-        };
-      }
-      
-      // Update overall status
-      result.isOnline = result.ping && result.onvif && result.rtsp;
-      
-      return result;
-      
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error during heartbeat check';
-      return {
-        ...result,
-        error: errorMessage,
-        details: {
-          ...result.details,
-          error: errorMessage
-        }
-      };
-    }
-
-    try {
-      // Check if camera is reachable via ping
-      result.ping = await this.pingCamera(camera.ipAddress);
-      if (!result.ping) {
-        result.details.pingError = 'Device not reachable';
-        return result;
-      }
-
-      // Check ONVIF connectivity
-      try {
-        const device = await this.createOnvifClient({
-          ipAddress: camera.ipAddress,
-          port: camera.port || 80,
-          username: camera.username || '',
-          password: camera.password ? await this.encryptionService.decrypt(camera.password) : ''
-        });
-        
-        result.onvif = true;
-        
-        // Check RTSP streams if ONVIF is working
-        const rtspUrls = await this.detectRTSPUrls(device);
-        if (rtspUrls && rtspUrls.length > 0) {
-          result.rtsp = true;
-          result.details.rtspUrls = rtspUrls;
-        } else {
-          result.details.rtspError = 'No RTSP streams found';
-        }
-      } catch (error) {
-        result.details.onvifError = error instanceof Error ? error.message : 'Unknown error';
-      }
-
-      // Overall status is true if both ping and ONVIF are working
-      result.overall = result.ping && result.onvif;
-      
-      return result;
-    } catch (error) {
-      this.logger.error('Error performing heartbeat check:', error);
-      result.details.error = error instanceof Error ? error.message : 'Unknown error';
-      return result;
-    }
-  }
-
-
-            }
-          }
-        } catch (error) {
-          this.logger.warn(`ONVIF check failed for ${ipAddress}:`, error instanceof Error ? error.message : String(error));
-          result.onvif = false;
-        }
-      }
-
-      // 3. Check RTSP stream
-      if (result.onvif && username && password) {
-        try {
-          // Try to detect RTSP URLs if not provided
-          const device = await this.createOnvifClient({
-            hostname: ipAddress,
-            port,
-            username,
-            password,
-            manufacturer
-          });
-          
-          if (device) {
-            const config = this.configDatabase.getManufacturerConfig(manufacturer || '');
-            const rtspUrls = await this.detectRTSPUrls(device, config);
-            
-            if (rtspUrls.length > 0) {
-              // Test the first available RTSP URL
-              const testUrl = rtspUrls[0].url;
-              result.rtsp = await this.testRTSPConnection(testUrl);
-            }
-          }
-        } catch (error) {
-          this.logger.warn(`RTSP check failed for ${ipAddress}:`, error instanceof Error ? error.message : String(error));
-          result.rtsp = false;
-        }
-      }
-
-      // Determine if camera is considered online
-      // We consider it online if it responds to ping AND (has ONVIF or RTSP working)
-      result.isOnline = result.ping && (result.onvif || result.rtsp);
-      
-      return result;
-    } catch (error) {
-      this.logger.error(`Heartbeat failed for ${ipAddress}:`, error instanceof Error ? error.message : String(error));
-      return {
-        ...result,
-        isOnline: false,
-        error: error instanceof Error ? error.message : 'Unknown error during heartbeat check'
-      };
     }
   }
 
@@ -1753,37 +1578,5 @@ export class ONVIFService extends EventEmitter {
     }
 
     return codecs.length > 0 ? codecs : ['H.264']; // Default value
-  }
-
-  private calculateConfidence(
-    rtspUrls: RTSPUrlInfo[],
-    credentials: SuggestedCredential[],
-    manufacturer: string
-  ): number {
-    // Peso para cada factor de confianza
-    const WEIGHTS = {
-      MANUFACTURER_KNOWN: 0.3,
-      RTSP_URL_VALID: 0.4,
-      CREDENTIALS_VALID: 0.3
-    };
-
-    let score = 0;
-    
-    // Puntuar fabricante conocido
-    if (manufacturer !== 'generic') {
-      score += WEIGHTS.MANUFACTURER_KNOWN;
-    }
-    
-    // Puntuar URLs RTSP válidas
-    const rtspScore = rtspUrls.reduce((sum, url) => sum + url.confidence, 0) / Math.max(rtspUrls.length, 1);
-    score += rtspScore * WEIGHTS.RTSP_URL_VALID;
-    
-    // Puntuar credenciales válidas
-    if (credentials.length > 0) {
-      const credScore = credentials.reduce((sum, cred) => sum + cred.confidence, 0) / credentials.length;
-      score += credScore * WEIGHTS.CREDENTIALS_VALID;
-    }
-    // Asegurar que el resultado esté entre 0 y 1
-    return Math.min(Math.max(score, 0), 1);
   }
 }
