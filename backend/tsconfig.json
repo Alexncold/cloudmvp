@@ -27,8 +27,8 @@
   "include": [
     "src/**/*",
     "test/**/*",
-    "../shared/types/**/*",
-    "__mocks__/**/*"
+    "__mocks__/**/*",
+    "../shared/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

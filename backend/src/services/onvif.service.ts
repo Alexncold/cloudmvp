@@ -6,17 +6,73 @@ import { Camera } from '@prisma/client';
 import { CameraConfigDatabase } from '../utils/camera-config-database';
 import { EncryptionService } from './encryption.service';
 import { logger } from '../utils/logger';
-import { 
+import type { 
   DiscoveredCamera, 
   RTSPUrlInfo, 
   ValidationResult, 
   CameraCapabilities, 
   SuggestedCredential,
   CameraDiscoveryOptions,
-  CameraConnectionOptions
+  CameraConnectionOptions,
+  StreamType,
+  AuthType,
+  VideoCodec,
+  HeartbeatResult
+} from '../../../shared/types/onvif';
+
+// Re-export types for backward compatibility
+export type { 
+  DiscoveredCamera, 
+  RTSPUrlInfo, 
+  ValidationResult, 
+  CameraCapabilities, 
+  SuggestedCredential,
+  CameraDiscoveryOptions,
+  CameraConnectionOptions,
+  StreamType,
+  AuthType,
+  VideoCodec,
+  HeartbeatResult 
 } from '../../../shared/types/onvif';
 
 type OnvifDevice = onvif.Device;
+
+// Type definitions
+interface DeviceInformation {
+  manufacturer?: string;
+  model?: string;
+  firmwareVersion?: string;
+  serialNumber?: string;
+  hardwareId?: string;
+}
+
+interface SystemDateAndTime {
+  UTCDateTime?: {
+    date?: {
+      year?: number;
+      month?: number;
+      day?: number;
+    };
+    time?: {
+      hour?: number;
+      minute?: number;
+      second?: number;
+    };
+  };
+  LocalDateTime?: {
+    date?: {
+      year?: number;
+      month?: number;
+      day?: number;
+    };
+    time?: {
+      hour?: number;
+      minute?: number;
+      second?: number;
+    };
+  };
+  Timezone?: string;
+}
 
 /**
  * Configuration for a camera manufacturer
@@ -90,76 +146,21 @@ interface RTSPUrlTestResult {
 }
 
 export class ONVIFService extends EventEmitter {
-  private onvifManager: typeof onvif;
+  private onvifManager: typeof onvif = onvif;
   private configDatabase: CameraConfigDatabase;
   private encryptionService: EncryptionService;
-  private discoveryCache = new Map<string, DiscoveredCamera>();
-  private pingCache = new Map<string, { timestamp: number; result: boolean }>();
+  private discoveryCache: Map<string, DiscoveredCamera>;
+  private pingCache: Map<string, { timestamp: number; result: boolean }>;
   private readonly PING_CACHE_TTL = 30000; // 30 segundos
-  private logger = logger; // Add logger as a class property
-
-  /**
-   * Retrieves device information from an ONVIF device
-   * @param device The ONVIF device instance
-   * @returns Device information including manufacturer, model, firmware, and uptime
-   */
-  private async getDeviceInfo(device: onvif.Device): Promise<{
-    manufacturer: string;
-    model: string;
-    firmware: string;
-    uptime?: number;
-  }> {
-    try {
-      // Get basic device information
-      const deviceInfo = await promisify(device.getDeviceInformation).call(device);
-      
-      // Get system date and time for uptime calculation if supported
-      let uptime: number | undefined;
-      try {
-        const systemDate = await promisify(device.getSystemDateAndTime).call(device);
-        if (systemDate && systemDate.UTCDateTime) {
-          const now = new Date();
-          const deviceTime = new Date(
-            systemDate.UTCDateTime.date.year,
-            (systemDate.UTCDateTime.date.month || 1) - 1,
-            systemDate.UTCDateTime.date.day || 1,
-            systemDate.UTCDateTime.time.hour || 0,
-            systemDate.UTCDateTime.time.minute || 0,
-            systemDate.UTCDateTime.time.second || 0
-          );
-          
-          // Calculate uptime in seconds (this is an approximation)
-          uptime = Math.floor((now.getTime() - deviceTime.getTime()) / 1000);
-        }
-      } catch (error) {
-        this.logger.debug('Could not get system date/time from device', { 
-          error: error instanceof Error ? error.message : String(error) 
-        });
-      }
-      
-      return {
-        manufacturer: deviceInfo.manufacturer || 'Unknown',
-        model: deviceInfo.model || 'Unknown',
-        firmware: deviceInfo.firmwareVersion || 'Unknown',
-        uptime
-      };
-    } catch (error) {
-      this.logger.warn('Failed to get device information', { 
-        error: error instanceof Error ? error.message : String(error) 
-      });
-      return {
-        manufacturer: 'Unknown',
-        model: 'Unknown',
-        firmware: 'Unknown'
-      };
-    }
-  }
+  private logger = logger;
 
   constructor() {
     super();
     this.onvifManager = onvif;
     this.configDatabase = new CameraConfigDatabase();
     this.encryptionService = new EncryptionService();
+    this.discoveryCache = new Map<string, DiscoveredCamera>();
+    this.pingCache = new Map<string, { timestamp: number; result: boolean }>();
   }
 
   /**
@@ -273,48 +274,151 @@ export class ONVIFService extends EventEmitter {
   /**
    * Tests connection to an RTSP stream
    */
-  private async testRTSPConnection(rtspUrl: string): Promise<boolean> {
+  /**
+   * Tests connection to an RTSP stream using ffprobe
+   * @param rtspUrl The RTSP URL to test
+   * @param timeoutMs Timeout in milliseconds (default: 10000)
+   * @returns Promise<boolean> True if the stream is valid, false otherwise
+   */
+  private async testRTSPConnection(rtspUrl: string, timeoutMs: number = 10000): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const ffprobe = spawn('ffprobe', [
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'stream=codec_name,width,height',
-        '-of', 'json',
-        rtspUrl
-      ]);
-      
+      type FFProbeResult = {
+        streams?: Array<{
+          codec_name?: string;
+          width?: number;
+          height?: number;
+          [key: string]: unknown;
+        }>;
+      };
+
+      let ffprobe: ReturnType<typeof spawn> | null = null;
+      let timeout: NodeJS.Timeout | null = null;
       let output = '';
       let errorOutput = '';
-      
-      ffprobe.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-      
-      ffprobe.stderr.on('data', (data) => {
-        errorOutput += data.toString();
-      });
-      
-      ffprobe.on('close', (code) => {
-        if (code === 0) {
-          try {
-            const result = JSON.parse(output);
-            resolve(!!result.streams?.[0]);
-          } catch {
+
+      const cleanup = (): void => {
+        // Clear timeout if it exists
+        if (timeout !== null) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+
+        // Clean up ffprobe process if it exists
+        if (ffprobe !== null) {
+          // Remove all event listeners to prevent memory leaks
+          ffprobe.stdout?.removeAllListeners('data');
+          ffprobe.stderr?.removeAllListeners('data');
+          ffprobe.removeAllListeners('close');
+          ffprobe.removeAllListeners('error');
+
+          // Kill the process if it's still running
+          if (!ffprobe.killed) {
+            try {
+              ffprobe.kill('SIGKILL');
+            } catch (error) {
+              this.logger.debug('Error killing ffprobe process', {
+                error: error instanceof Error ? error.message : String(error),
+                rtspUrl
+              });
+            }
+          }
+          ffprobe = null;
+        }
+      };
+
+      const onTimeout = (): void => {
+        this.logger.debug('FFprobe timed out', { rtspUrl, timeoutMs });
+        cleanup();
+        resolve(false);
+      };
+
+      const onError = (error: Error): void => {
+        this.logger.debug('FFprobe process error', { 
+          error: error.message,
+          rtspUrl 
+        });
+        cleanup();
+        resolve(false);
+      };
+
+      try {
+        // Spawn ffprobe process with appropriate arguments
+        ffprobe = spawn('ffprobe', [
+          '-v', 'error',
+          '-select_streams', 'v:0',
+          '-show_entries', 'stream=codec_name,width,height',
+          '-of', 'json',
+          rtspUrl
+        ], {
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        // Handle stdout data
+        ffprobe.stdout?.on('data', (data: Buffer): void => {
+          output += data.toString('utf8');
+        });
+
+        // Handle stderr data
+        ffprobe.stderr?.on('data', (data: Buffer): void => {
+          errorOutput += data.toString('utf8');
+        });
+
+        // Handle process close event
+        ffprobe.on('close', (code: number | null): void => {
+          cleanup();
+          
+          if (code === 0) {
+            try {
+              // Parse ffprobe output
+              const result: FFProbeResult = JSON.parse(output);
+              const hasValidStreams = Array.isArray(result.streams) && 
+                result.streams.length > 0 &&
+                result.streams.some(stream => 
+                  stream.codec_name && 
+                  stream.width && 
+                  stream.height
+                );
+              
+              if (!hasValidStreams) {
+                this.logger.debug('No valid video streams found in ffprobe output', { 
+                  rtspUrl,
+                  output,
+                  errorOutput
+                });
+              }
+              resolve(hasValidStreams);
+            } catch (error) {
+              this.logger.debug('Failed to parse ffprobe output', { 
+                error: error instanceof Error ? error.message : String(error),
+                output,
+                errorOutput,
+                rtspUrl
+              });
+              resolve(false);
+            }
+          } else {
+            this.logger.debug('FFprobe process failed', { 
+              code,
+              error: errorOutput || 'No error output',
+              rtspUrl 
+            });
             resolve(false);
           }
-        } else {
-          logger.debug('Error en ffprobe', { error: errorOutput });
-          resolve(false);
-        }
-      });
-      
-      // Timeout after 10 seconds
-      setTimeout(() => {
-        if (!ffprobe.killed) {
-          ffprobe.kill();
-          resolve(false);
-        }
-      }, 10000);
+        });
+
+        // Handle process errors
+        ffprobe.on('error', onError);
+        
+        // Set timeout for the ffprobe process
+        timeout = setTimeout(onTimeout, timeoutMs);
+      } catch (error) {
+        this.logger.error('Error in testRTSPConnection', {
+          error: error instanceof Error ? error.message : String(error),
+          rtspUrl
+        });
+        cleanup();
+        resolve(false);
+      }
     });
   }
 
@@ -494,16 +598,21 @@ export class ONVIFService extends EventEmitter {
           [key: string]: unknown;
         }
 
-        const ptzStatus = await new Promise<PTZStatus>((resolve) => {
-          device.getStatus({ ProfileToken: 'Profile_1' }, (err: Error | null, data?: unknown) => {
-            if (err) {
-              this.logger.debug(`PTZ status check failed: ${err.message}`, { error: err });
-              resolve({});
-            } else {
-              resolve((data as PTZStatus) || {});
-            }
+        let ptzStatus: PTZStatus = {};
+        try {
+          ptzStatus = await new Promise<PTZStatus>((resolve, reject) => {
+            device.getStatus({ ProfileToken: 'Profile_1' }, (err: Error | null, data?: any) => {
+              if (err) {
+                this.logger.debug(`PTZ status check failed: ${err.message}`, { error: err });
+                resolve({});
+              } else {
+                resolve(data || {});
+              }
+            });
           });
-        });
+        } catch (error) {
+          this.logger.debug('Error getting PTZ status', { error: error instanceof Error ? error.message : String(error) });
+        }
         
         if (ptzStatus?.position) {
           baseCapabilities.hasPTZ = true;
@@ -516,10 +625,14 @@ export class ONVIFService extends EventEmitter {
           
           // Check for presets
           try {
-            const presets = await new Promise<any[]>((resolve, reject) => {
-              device.getPresets({ ProfileToken: 'Profile_1' }, (err, data) => {
-                if (err) reject(err);
-                else resolve(data);
+            const presets = await new Promise<any[]>((resolve) => {
+              device.getPresets({ ProfileToken: 'Profile_1' }, (err: Error | null, data: any) => {
+                if (err) {
+                  this.logger.debug('Error getting presets', { error: err.message });
+                  resolve([]);
+                } else {
+                  resolve(Array.isArray(data) ? data : []);
+                }
               });
             });
             baseCapabilities.hasPresets = Array.isArray(presets) && presets.length > 0;
@@ -675,8 +788,18 @@ export class ONVIFService extends EventEmitter {
           };
         }
 
-        const videoSources = await promisify<VideoSource[], []>(device.getVideoSources).call(device);
-        if (videoSources?.[0]?.$) {
+        const videoSources = await new Promise<VideoSource[]>((resolve, reject) => {
+          device.getVideoSources((err: Error | null, data: any) => {
+            if (err) {
+              this.logger.debug('Error getting video sources', { error: err.message });
+              resolve([]);
+            } else {
+              resolve(Array.isArray(data) ? data : []);
+            }
+          });
+        });
+
+        if (videoSources.length > 0 && videoSources[0].$) {
           const videoSource = videoSources[0].$;
           
           // Usar type assertion para acceder a propiedades específicas del fabricante
@@ -961,70 +1084,25 @@ export class ONVIFService extends EventEmitter {
     }
   }
 
-/**
- * Result of a camera heartbeat check
- */
-interface HeartbeatResult {
-  /** Camera ID */
-  cameraId: string;
-  /** Overall status (true if both ping and ONVIF are working) */
-  overall: boolean;
-  /** Whether the camera responded to ping */
-  ping: boolean;
-  /** Whether ONVIF communication is working */
-  onvif: boolean;
-  /** Whether RTSP stream is accessible */
-  rtsp: boolean;
-  /** When the heartbeat was performed */
-  timestamp: Date;
-  /** When the camera was last seen */
-  lastSeen: Date;
-  /** Camera uptime in seconds, if available */
-  uptime?: number;
-  /** Additional details about the heartbeat result */
-  details: {
-    /** Error details for ping check */
-    pingError?: string;
-    /** Error details for ONVIF check */
-    onvifError?: string;
-    /** Error details for RTSP check */
-    rtspError?: string;
-    /** Device information if ONVIF check succeeded */
-    deviceInfo?: {
-      manufacturer: string;
-      model: string;
-      firmware: string;
-      uptime?: number;
-    };
-    /** List of available RTSP URLs if RTSP check succeeded */
-    rtspUrls?: Array<{
-      url: string;
-      streamType: 'main' | 'sub' | 'mobile';
-      resolution: string;
-      tested: boolean;
-      source: string;
-    }>;
-    /** Any additional error information */
-    error?: string;
-    [key: string]: any;
-  };
-}
+
 
   /**
    * Performs a heartbeat check on a camera to verify its status
-   * @param camera Camera configuration
+   * @param camera Camera configuration with optional encrypted password and manufacturer
    * @returns Heartbeat result with detailed status information
    */
-  public async performHeartbeat(camera: Camera & { password_encrypted?: string; manufacturer?: string }): Promise<HeartbeatResult> {
+  public async performHeartbeat(
+    camera: Camera & { password_encrypted?: string; manufacturer?: string }
+  ): Promise<HeartbeatResult> {
+    // Initialize result with default values
     const result: HeartbeatResult = {
-      cameraId: camera.id,
+      cameraId: Number(camera.id), // Ensure cameraId is a number
       overall: false,
       ping: false,
       onvif: false,
       rtsp: false,
       timestamp: new Date(),
-      details: {},
-      lastSeen: new Date()
+      details: {}
     };
 
     try {
@@ -1032,18 +1110,20 @@ interface HeartbeatResult {
       result.ping = await this.pingCamera(camera.ipAddress);
       
       if (!result.ping) {
-        this.logger.warn(`Camera not reachable by ping`, { cameraId: camera.id });
-        result.details.pingError = 'Device not reachable';
+        this.logger.warn('Camera not reachable by ping', { cameraId: camera.id });
+        result.details.pingError = 'Camera not reachable by ping';
         return result;
       }
       
       // 2. Check ONVIF service if credentials are available
       if (camera.username) {
         try {
+          // Decrypt password if encrypted
           const password = camera.password_encrypted 
             ? await this.encryptionService.decrypt(camera.password_encrypted) 
             : '';
             
+          // Create ONVIF client
           const device = await this.createOnvifClient({
             ipAddress: camera.ipAddress,
             port: camera.port || 80,
@@ -1056,99 +1136,209 @@ interface HeartbeatResult {
           const deviceInfo = await this.getDeviceInfo(device);
           result.onvif = true;
           
-          // Include device info in details
-          if (deviceInfo) {
-            result.details.deviceInfo = deviceInfo;
-            if (deviceInfo.uptime) {
-              result.uptime = deviceInfo.uptime;
-            }
-          }
-        result.onvif = true;
-      } catch (error) {
-        this.logger.warn(`Fallo en conexión ONVIF`, { 
-          cameraId: camera.id, 
-          error: error instanceof Error ? error.message : String(error) 
-        });
-      }
-      
-      // 3. Verificar RTSP
-      if (camera.rtspUrl) {
-        const password = camera.password_encrypted ? await this.encryptionService.decrypt(camera.password_encrypted) : '';
-        const rtspUrl = camera.rtspUrl
-          .replace('rtsp://', `rtsp://${camera.username}:${password}@`);
+          // Update device info in details
+          result.details.deviceInfo = {
+            manufacturer: deviceInfo.manufacturer,
+            model: deviceInfo.model,
+            firmware: deviceInfo.firmware,
+            uptime: deviceInfo.uptime
+          };
           
-        result.rtsp = await this.testRTSPConnection(rtspUrl);
-        
-        if (!result.rtsp) {
-          this.logger.warn(`Fallo en conexión RTSP`, { cameraId: camera.id });
+          // Store uptime in details if available
+          if (deviceInfo.uptime) {
+            result.details.uptime = deviceInfo.uptime;
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          this.logger.warn('ONVIF connection failed', { 
+            cameraId: camera.id, 
+            error: errorMessage
+          });
+          result.details.onvifError = errorMessage;
         }
       }
       
-      // 4. Determinar estado general
+      // 3. Check RTSP if URL is available
+      if (camera.rtspUrl) {
+        try {
+          let rtspUrl = camera.rtspUrl;
+          
+          // Add authentication to RTSP URL if credentials are available
+          if (camera.username) {
+            const password = camera.password_encrypted 
+              ? await this.encryptionService.decrypt(camera.password_encrypted) 
+              : '';
+              
+            rtspUrl = rtspUrl.replace(
+              'rtsp://', 
+              `rtsp://${camera.username}:${password}@`
+            );
+          }
+          
+          // Test RTSP connection
+          result.rtsp = await this.testRTSPConnection(rtspUrl);
+          
+          if (!result.rtsp) {
+            this.logger.warn('RTSP connection failed', { cameraId: camera.id });
+            result.details.rtspError = 'RTSP connection failed';
+          } else {
+            // Add RTSP URL to details if connection was successful
+            result.details.rtspUrls = [{
+              url: rtspUrl,
+              streamType: 'main' as const,
+              resolution: 'auto-detect',
+              confidence: 1.0,
+              tested: true,
+              source: 'user-provided' as const
+            }];
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          this.logger.warn('RTSP check failed', { 
+            cameraId: camera.id, 
+            error: errorMessage
+          });
+          result.details.rtspError = errorMessage;
+        }
+      }
+      
+      // 4. Determine overall status
       result.overall = result.ping && (result.onvif || result.rtsp);
+      
+      // Update the timestamp to indicate when the check was completed
+      result.timestamp = new Date();
       
       return result;
     } catch (error) {
-      this.logger.error('Error en el heartbeat', { 
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error('Error in heartbeat check', { 
         cameraId: camera.id, 
-        error: error instanceof Error ? error.message : String(error) 
+        error: errorMessage
       });
       
-      result.details.error = error instanceof Error ? error.message : 'Unknown error';
+      result.details.error = errorMessage;
       return result;
     }
   }
 
   // ===== MÉTODOS AUXILIARES =====
 
+  /**
+   * Retrieves detailed device information from an ONVIF device
+   * @param device The ONVIF device instance
+   * @returns Device information including manufacturer, model, firmware, and uptime
+   */
   private async getDeviceInfo(device: onvif.Device): Promise<{
     manufacturer: string;
     model: string;
     firmware: string;
     uptime?: number;
   }> {
+    const defaultResult = {
+      manufacturer: 'Unknown',
+      model: 'Unknown',
+      firmware: 'Unknown'
+    };
+
     try {
       // Get basic device information
-      const deviceInfo = await promisify(device.getDeviceInformation).call(device);
+      const deviceInfo = await new Promise<onvif.DeviceInfo>((resolve, reject) => {
+        device.getDeviceInformation((err: Error | null, data: onvif.DeviceInfo) => {
+          if (err) {
+            this.logger.warn(`Failed to get device information: ${err.message}`);
+            reject(err);
+          } else {
+            resolve(data);
+          }
+        });
+      });
+      
       const result = {
-        manufacturer: deviceInfo.manufacturer || 'Unknown',
-        model: deviceInfo.model || 'Unknown',
-        firmware: deviceInfo.firmwareVersion || 'Unknown'
+        manufacturer: deviceInfo.manufacturer || defaultResult.manufacturer,
+        model: deviceInfo.model || defaultResult.model,
+        firmware: deviceInfo.firmwareVersion || defaultResult.firmware
       };
 
       // Try to get system date and time to calculate uptime
       try {
-        const systemDate = await promisify(device.getSystemDateAndTime).call(device);
-        if (systemDate.UTCDateTime) {
-          const deviceTime = new Date(
-            Date.UTC(
-              systemDate.UTCDateTime.date.year,
-              systemDate.UTCDateTime.date.month - 1, // JS months are 0-indexed
-              systemDate.UTCDateTime.date.day,
-              systemDate.UTCDateTime.time.hour,
-              systemDate.UTCDateTime.time.minute,
-              systemDate.UTCDateTime.time.second
-            )
-          );
+        type SystemDateAndTime = {
+          UTCDateTime?: {
+            date?: { year?: number; month?: number; day?: number };
+            time?: { hour?: number; minute?: number; second?: number };
+          };
+          LocalDateTime?: {
+            date?: { year?: number; month?: number; day?: number };
+            time?: { hour?: number; minute?: number; second?: number };
+          };
+          Timezone?: string;
+        };
+
+        const systemDate = await new Promise<SystemDateAndTime>((resolve, reject) => {
+          device.getSystemDateAndTime((err: Error | null, data: any) => {
+            if (err) {
+              this.logger.warn(`Failed to get system date/time: ${err.message}`);
+              reject(err);
+            } else {
+              resolve(data);
+            }
+          });
+        });
+
+        // Try to calculate uptime from UTC time first
+        if (systemDate.UTCDateTime?.date && systemDate.UTCDateTime?.time) {
+          const utcDate = systemDate.UTCDateTime.date;
+          const utcTime = systemDate.UTCDateTime.time;
           
-          // If we have both local and UTC time, we can calculate uptime
-          if (systemDate.LocalDateTime) {
-            const localDeviceTime = new Date(
+          // Validate required date/time fields
+          if (utcDate.year !== undefined && utcDate.month !== undefined && utcDate.day !== undefined &&
+              utcTime.hour !== undefined && utcTime.minute !== undefined && utcTime.second !== undefined) {
+            
+            const deviceTime = new Date(
               Date.UTC(
-                systemDate.LocalDateTime.date.year,
-                systemDate.LocalDateTime.date.month - 1,
-                systemDate.LocalDateTime.date.day,
-                systemDate.LocalDateTime.time.hour,
-                systemDate.LocalDateTime.time.minute,
-                systemDate.LocalDateTime.time.second
+                utcDate.year,
+                utcDate.month - 1, // JS months are 0-indexed
+                utcDate.day,
+                utcTime.hour,
+                utcTime.minute,
+                utcTime.second
               )
             );
             
-            const timezoneOffsetMs = deviceTime.getTime() - localDeviceTime.getTime();
-            const now = new Date();
-            const uptimeMs = now.getTime() - (deviceTime.getTime() + timezoneOffsetMs);
+            // If we have both local and UTC time, we can calculate timezone offset
+            if (systemDate.LocalDateTime?.date && systemDate.LocalDateTime?.time) {
+              const localDate = systemDate.LocalDateTime.date;
+              const localTime = systemDate.LocalDateTime.time;
+              
+              if (localDate.year !== undefined && localDate.month !== undefined && localDate.day !== undefined &&
+                  localTime.hour !== undefined && localTime.minute !== undefined && localTime.second !== undefined) {
+                
+                const localDeviceTime = new Date(
+                  localDate.year,
+                  localDate.month - 1,
+                  localDate.day,
+                  localTime.hour,
+                  localTime.minute,
+                  localTime.second
+                );
+                
+                const timezoneOffsetMs = deviceTime.getTime() - localDeviceTime.getTime();
+                const now = new Date();
+                const uptimeMs = now.getTime() - (deviceTime.getTime() + timezoneOffsetMs);
+                
+                // Only include if it's a reasonable value (positive and less than 1 year)
+                if (uptimeMs > 0 && uptimeMs < 365 * 24 * 60 * 60 * 1000) {
+                  return {
+                    ...result,
+                    uptime: Math.floor(uptimeMs / 1000) // Convert to seconds
+                  };
+                }
+              }
+            }
             
-            // Only include if it's a reasonable value (positive and less than 1 year)
+            // Fallback to simple UTC-based calculation if local time is not available
+            const now = new Date();
+            const uptimeMs = now.getTime() - deviceTime.getTime();
+            
             if (uptimeMs > 0 && uptimeMs < 365 * 24 * 60 * 60 * 1000) {
               return {
                 ...result,
@@ -1158,55 +1348,56 @@ interface HeartbeatResult {
           }
         }
       } catch (error) {
-        logger.debug('Could not get system uptime', {
+        this.logger.debug('Could not get system uptime', {
           error: error instanceof Error ? error.message : String(error)
         });
       }
       
-      return {
-        manufacturer: deviceInfo.manufacturer || 'Unknown',
-        model: deviceInfo.model || 'Unknown',
-        firmware: deviceInfo.firmwareVersion || 'Unknown'
-      };
+      return result;
+      
     } catch (error) {
-      logger.error('Error getting device info:', error);
-      return {
-        manufacturer: 'Unknown',
-        model: 'Unknown',
-        firmware: 'Unknown'
-      };
+      this.logger.error(`Failed to get device info: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return defaultResult;
     }
   }
 
   /**
-   * Detecta las URLs RTSP disponibles para un dispositivo ONVIF
-   * @param device Dispositivo ONVIF
-   * @param config Configuración del fabricante (opcional)
-   * @returns Lista de URLs RTSP detectadas con metadatos
+   * Detects RTSP URLs for a given ONVIF device
+   * @param device The ONVIF device to detect RTSP URLs for
+   * @param config Optional manufacturer configuration
+   * @returns Array of detected RTSP URLs with metadata
    */
   private async detectRTSPUrls(
     device: onvif.Device,
-    config?: ReturnType<CameraConfigDatabase['getManufacturerConfig']>
+    config?: ManufacturerConfig | null
   ): Promise<RTSPUrlInfo[]> {
-    this.logger.debug('Detectando URLs RTSP para el dispositivo', { hostname: device.hostname });
-    const rtspUrls: RTSPUrlInfo[] = [];
-    
     try {
-      // 1. Intentar con las rutas del fabricante si están disponibles
-      if (config?.rtsp?.paths) {
-        for (const path of config.rtsp.paths) {
-          await this.testAndAddRTSPUrl(rtspUrls, device.hostname, path, 'manufacturer');
+      if (!device || !device.hostname) {
+        this.logger.warn('Invalid device or missing hostname');
+        return [];
+      }
+
+      this.logger.debug('Detecting RTSP URLs for device', { hostname: device.hostname });
+      const rtspUrls: RTSPUrlInfo[] = [];
+      
+      // 1. Try manufacturer paths if available
+      if (config?.paths && Array.isArray(config.paths)) {
+        for (const path of config.paths) {
+          if (typeof path === 'string') {
+            await this.testAndAddRTSPUrl(rtspUrls, device.hostname, path, 'manufacturer');
+          }
         }
       }
       
-      // 2. Si no se encontraron URLs, intentar con rutas comunes
+      // 2. If no URLs found, try common paths
       if (rtspUrls.length === 0) {
-        const commonPaths = [
-          { path: '/Streaming/Channels/101', type: 'main' as const },
-          { path: '/live.sdp', type: 'main' as const },
-          { path: '/onvif1', type: 'main' as const },
-          { path: '/media/video1', type: 'sub' as const },
-          { path: '/cam/realmonitor?channel=1&subtype=0', type: 'main' as const }
+        type CommonPath = { path: string; type: 'main' | 'sub' | 'mobile' };
+        const commonPaths: CommonPath[] = [
+          { path: '/Streaming/Channels/101', type: 'main' },
+          { path: '/live.sdp', type: 'main' },
+          { path: '/onvif1', type: 'main' },
+          { path: '/media/video1', type: 'sub' },
+          { path: '/cam/realmonitor?channel=1&subtype=0', type: 'main' }
         ];
         
         for (const { path, type } of commonPaths) {
@@ -1214,10 +1405,10 @@ interface HeartbeatResult {
         }
       }
       
-      return rtspUrls;
+      return rtspUrls.filter((url): url is RTSPUrlInfo => url !== null);
     } catch (error) {
-      this.logger.error('Error al detectar URLs RTSP', { 
-        hostname: device.hostname,
+      this.logger.error('Error detecting RTSP URLs', { 
+        hostname: device?.hostname || 'unknown',
         error: error instanceof Error ? error.message : String(error) 
       });
       return [];
@@ -1229,99 +1420,206 @@ interface HeartbeatResult {
    * @param rtspUrls Array of RTSP URL information
    * @param hostname Camera hostname or IP address
    * @param path RTSP path to test
-   * @param source Source of the RTSP URL (e.g., 'manufacturer', 'common', 'auto-detected')
-   * @param streamType Type of stream ('main', 'sub', 'mobile')
+   * @param source Source of the RTSP URL ('auto-detected', 'manual', 'discovered', 'user-defined', or stream type)
+   * @param streamType Optional explicit stream type ('main', 'sub', 'mobile')
+   */
+  /**
+   * Tests an RTSP URL and adds it to the list if it's reachable
+   * @param rtspUrls Array of RTSP URL information
+   * @param hostname Camera hostname or IP address
+   * @param path RTSP path to test
+   * @param source Source of the RTSP URL ('auto-detected', 'manual', 'discovered', 'user-defined', or stream type)
+   * @param streamType Optional explicit stream type ('main', 'sub', 'mobile')
    */
   private async testAndAddRTSPUrl(
     rtspUrls: RTSPUrlInfo[],
     hostname: string,
     path: string,
     source: RTSPUrlInfo['source'] | 'main' | 'sub' | 'mobile',
-    streamType?: 'main' | 'sub' | 'mobile'
+    streamType?: RTSPUrlInfo['streamType']
   ): Promise<void> {
-    // Normalize source to match RTSPUrlInfo['source'] type
-    const normalizedSource: RTSPUrlInfo['source'] = 
-      (source === 'main' || source === 'sub' || source === 'mobile') ? 'auto-detected' : source;
+    if (!hostname) {
+      this.logger?.warn?.('Cannot test RTSP URL: missing hostname');
+      return;
+    }
 
-    // Determine stream type if not provided
-    const finalStreamType = streamType || 
-      (source === 'main' || source === 'sub' || source === 'mobile' ? source : 'main');
+    // Determine the final stream type (default to 'main' if not specified)
+    const streamTypes = ['main', 'sub', 'mobile', 'snapshot', 'event'] as const;
+    const finalStreamType: RTSPUrlInfo['streamType'] = streamType || 
+      (streamTypes.includes(source as any) ? source as RTSPUrlInfo['streamType'] : 'main');
     
+    // Normalize the source to ensure it's a valid RTSPUrlInfo['source']
+    const validSources = ['manufacturer', 'common', 'auto-detected', 'user-provided'] as const;
+    const sourceStr = String(source);
+    const normalizedSource = validSources.includes(sourceStr as any) 
+      ? sourceStr as RTSPUrlInfo['source'] 
+      : 'auto-detected';
+    
+    // Clean up the path (ensure it starts with /)
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    
+    // Construct the full RTSP URL
+    const url = `rtsp://${hostname}${cleanPath}`;
+    
+    // Check if we've already tested this URL (case-insensitive check)
+    const existingUrlIndex = rtspUrls.findIndex(u => u.url.toLowerCase() === url.toLowerCase());
+    if (existingUrlIndex >= 0) {
+      this.logger.debug(`Skipping already tested URL: ${url}`);
+      return;
+    }
+
     try {
-      // Clean up the path (remove leading slash if present and ensure it starts with /)
-      const cleanPath = path.startsWith('/') ? path : `/${path}`;
-      
-      // Construct the full RTSP URL
-      const url = `rtsp://${hostname}${cleanPath}`;
-      
-      // Check if we've already tested this URL
-      const existingIndex = rtspUrls.findIndex(u => u.url === url);
-      if (existingIndex >= 0) {
-        this.logger.debug(`Skipping already tested URL: ${url}`);
-        return;
-      }
-      
       // Test the RTSP connection
       const isReachable = await this.testRTSPConnection(url);
       
+      // Create RTSP URL info with all required properties
+      const rtspUrlInfo: RTSPUrlInfo = {
+        url,
+        streamType: finalStreamType,
+        resolution: 'auto-detect',
+        confidence: isReachable ? 0.9 : 0.1, // Higher confidence if reachable
+        tested: true,
+        source: normalizedSource,
+        // Optional properties with default values
+        authType: 'none',
+        bitrate: 0,
+        framerate: 0,
+        codec: 'H.264' as VideoCodec
+      };
+      
       if (isReachable) {
-        // Create a new RTSP URL info object
-        const newUrlInfo: RTSPUrlInfo = {
-          url,
+        rtspUrls.push(rtspUrlInfo);
+        this.logger.debug(`Successfully tested RTSP URL: ${url}`, {
           streamType: finalStreamType,
-          resolution: 'auto-detect', // Will be updated later
-          confidence: 0.8, // Base confidence
-          tested: true,
           source: normalizedSource,
-          authType: 'none', // Will be updated during authentication
-          bitrate: 0, // Will be updated during stream analysis
-          framerate: 0, // Will be updated during stream analysis
-          codec: 'h264' // Default, will be updated during stream analysis
-        };
-        
-        // Check if we already have this URL with a different case
-        const existingUrlIndex = rtspUrls.findIndex(u => u.url.toLowerCase() === url.toLowerCase());
-        
-        if (existingUrlIndex >= 0) {
-          // Update existing entry with new confidence and source if higher confidence
-          if (newUrlInfo.confidence > rtspUrls[existingUrlIndex].confidence) {
-            rtspUrls[existingUrlIndex] = {
-              ...rtspUrls[existingUrlIndex],
-              ...newUrlInfo
-            };
-            this.logger.debug(`Updated RTSP URL with higher confidence: ${url}`, {
-              streamType: finalStreamType,
-              source: normalizedSource,
-              confidence: newUrlInfo.confidence
-            });
-          }
-        } else {
-          // Add new URL
-          rtspUrls.push(newUrlInfo);
-          this.logger.debug(`Added new RTSP URL: ${url}`, {
-            streamType: finalStreamType,
-            source: normalizedSource,
-            confidence: newUrlInfo.confidence
-          });
-        }
+          confidence: rtspUrlInfo.confidence
+        });
       } else {
+        // Still add the URL but with lower confidence
+        rtspUrls.push({
+          ...rtspUrlInfo,
+          confidence: 0.1,
+          tested: false
+        });
         this.logger.debug(`RTSP URL not reachable: ${url}`);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Error testing RTSP URL ${hostname}${path}: ${errorMessage}`);
+      this.logger.error(`Error testing RTSP URL ${url}: ${errorMessage}`);
+      
+      // Add the failed URL with low confidence
+      rtspUrls.push({
+        url,
+        streamType: finalStreamType,
+        resolution: 'unknown',
+        confidence: 0.1,
+        tested: false,
+        source: normalizedSource,
+        error: errorMessage,
+        authType: 'none',
+        bitrate: 0,
+        framerate: 0
+      });
     }
   }
 
   /**
-   * Performs a heartbeat check on a camera to verify its status
-   * @param camera Camera object with connection details
-   * @returns Promise with the heartbeat result
-   */
+    rtsp: boolean;
+    lastSeen: Date;
+    timestamp: Date;
+    details: Record<string, unknown>;
+    error?: string;
+  }> {
+    const { ipAddress, port = 80, username, password, manufacturer } = camera;
+    const timestamp = new Date();
+    
+    const result = {
+      isOnline: false,
+      ping: false,
+      onvif: false,
       rtsp: false,
-      timestamp: new Date(),
+      lastSeen: timestamp,
+      timestamp,
       details: {}
     };
+
+    try {
+      // 1. Test basic ping
+      result.ping = await this.pingCamera(ipAddress);
+      
+      // 2. Test ONVIF connection if ping was successful
+      if (result.ping) {
+        try {
+          const device = await this.createOnvifClient({
+            ipAddress,
+            port,
+            username: username || '',
+            password: password || '',
+            manufacturer
+          });
+          
+          // Get device info
+          const deviceInfo = await this.getDeviceInfo(device);
+          result.onvif = true;
+          
+          // Update details with device information
+          result.details = {
+            ...result.details,
+            deviceInfo
+          };
+          
+          // 3. Test RTSP if ONVIF was successful
+          try {
+            const rtspUrls = await this.detectRTSPUrls(device);
+            if (rtspUrls.length > 0) {
+              result.rtsp = true;
+              result.details = {
+                ...result.details,
+                rtspUrls: rtspUrls.map(url => ({
+                  url: url.url,
+                  streamType: url.streamType,
+                  resolution: url.resolution || 'unknown',
+                  tested: url.tested || false,
+                  source: url.source || 'auto-detected'
+                }))
+              };
+            }
+          } catch (rtspError) {
+            result.details = {
+              ...result.details,
+              rtspError: rtspError instanceof Error ? rtspError.message : 'Unknown RTSP error'
+            };
+          }
+          
+        } catch (onvifError) {
+          result.details = {
+            ...result.details,
+            onvifError: onvifError instanceof Error ? onvifError.message : 'Unknown ONVIF error'
+          };
+        }
+      } else {
+        result.details = {
+          ...result.details,
+          pingError: 'Could not ping the device'
+        };
+      }
+      
+      // Update overall status
+      result.isOnline = result.ping && result.onvif && result.rtsp;
+      
+      return result;
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error during heartbeat check';
+      return {
+        ...result,
+        error: errorMessage,
+        details: {
+          ...result.details,
+          error: errorMessage
+        }
+      };
+    }
 
     try {
       // Check if camera is reachable via ping
@@ -1365,51 +1663,7 @@ interface HeartbeatResult {
     }
   }
 
-  async performHeartbeat(camera: Camera & { password_encrypted?: string; manufacturer?: string }): Promise<{
-    isOnline: boolean;
-    ping: boolean;
-    onvif: boolean;
-    rtsp: boolean;
-    lastSeen?: Date;
-    uptime?: number;
-    error?: string;
-  }> {
-    const { ipAddress, port = 80, username, password, manufacturer } = camera;
-    const result = {
-      isOnline: false,
-      ping: false,
-      onvif: false,
-      rtsp: false,
-      lastSeen: new Date()
-    };
 
-    try {
-      // 1. Check basic connectivity with ping
-      result.ping = await this.pingCamera(ipAddress);
-      
-      if (!result.ping) {
-        return { ...result, isOnline: false, error: 'No response to ping' };
-      }
-
-      // 2. Check ONVIF service if credentials are available
-      if (username && password) {
-        try {
-          const device = await this.createOnvifClient({
-            hostname: ipAddress,
-            port,
-            username,
-            password,
-            manufacturer
-          });
-          
-          if (device) {
-            // Try to get device info to verify ONVIF is working
-            const deviceInfo = await this.getDeviceInfo(device);
-            result.onvif = !!deviceInfo;
-            
-            // If we have uptime info, include it
-            if (deviceInfo?.uptime) {
-              result.uptime = deviceInfo.uptime;
             }
           }
         } catch (error) {
@@ -1529,7 +1783,6 @@ interface HeartbeatResult {
       const credScore = credentials.reduce((sum, cred) => sum + cred.confidence, 0) / credentials.length;
       score += credScore * WEIGHTS.CREDENTIALS_VALID;
     }
-    
     // Asegurar que el resultado esté entre 0 y 1
     return Math.min(Math.max(score, 0), 1);
   }
