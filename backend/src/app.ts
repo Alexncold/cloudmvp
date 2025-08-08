@@ -149,14 +149,14 @@ const createApp = async (): Promise<Application> => {
   // Error logging middleware
   app.use(errorLogger);
 
-  // Error handling middleware
-  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-    // If headers were already sent, delegate to the default Express error handler
+  // Manejador de errores centralizado
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    // Si los encabezados ya fueron enviados, delegar al manejador de errores predeterminado de Express
     if (res.headersSent) {
       return next(err);
     }
 
-    // Log the error with request context
+    // Loggear el error con el contexto de la solicitud
     logger.error('Error handler caught:', {
       message: err.message,
       stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
@@ -167,79 +167,43 @@ const createApp = async (): Promise<Application> => {
       body: req.body,
     });
 
-    // Format the error response
-    const statusCode = (err as any).statusCode || 500;
+    let statusCode = err.statusCode || 500;
+    let errorCode = err.code || 'INTERNAL_SERVER_ERROR';
+    let errorMessage = err.message || 'Internal Server Error';
+    let errorDetails = process.env.NODE_ENV === 'development' ? err.stack : undefined;
+
+    // Manejar errores específicos
+    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+      statusCode = 401;
+      errorCode = 'INVALID_TOKEN';
+      errorMessage = 'Invalid or expired authentication token';
+      errorDetails = undefined;
+    } else if (err.name === 'ValidationError') {
+      statusCode = 400;
+      errorCode = 'VALIDATION_ERROR';
+      errorMessage = 'Validation failed';
+      errorDetails = err.details || err.message;
+    } else if (err.status === 429) {
+      statusCode = 429;
+      errorCode = 'RATE_LIMIT_EXCEEDED';
+      errorMessage = 'Too many requests, please try again later';
+      errorDetails = err.retryAfter;
+    } else if (statusCode >= 500) {
+      errorMessage = 'An unexpected error occurred';
+    }
+
     const errorResponse: ApiResponse<null> = {
       success: false,
       error: {
-        code: (err as any).code || 'INTERNAL_SERVER_ERROR',
-        message: statusCode >= 500 ? 'An unexpected error occurred' : err.message,
-        details: process.env.NODE_ENV === 'development' ? {
-          stack: err.stack,
-          ...(err as any).details,
-        } : undefined,
+        code: errorCode,
+        message: errorMessage,
+        details: errorDetails,
       },
       data: null,
       timestamp: new Date().toISOString(),
     };
 
     res.status(statusCode).json(errorResponse);
-  });
-
-  // Handle JWT errors
-  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        success: false,
-        error: {
-          code: 'INVALID_TOKEN',
-          message: 'Invalid or expired authentication token',
-        },
-        timestamp: new Date().toISOString(),
-      });
-    }
-    
-    // Handle validation errors
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'VALIDATION_ERROR',
-          message: 'Validation failed',
-          details: err.details || err.message,
-        },
-        timestamp: new Date().toISOString(),
-      });
-    }
-    
-    // Handle rate limit errors
-    if (err.status === 429) {
-      return res.status(429).json({
-        success: false,
-        error: {
-          code: 'RATE_LIMIT_EXCEEDED',
-          message: 'Too many requests, please try again later',
-          retryAfter: err.retryAfter,
-        },
-        timestamp: new Date().toISOString(),
-      });
-    }
-    
-    // Default error response
-    const statusCode = err.statusCode || 500;
-    const response: ApiResponse = {
-      success: false,
-      error: {
-        code: err.code || 'INTERNAL_SERVER_ERROR',
-        message: process.env.NODE_ENV === 'production' 
-          ? 'An unexpected error occurred' 
-          : err.message || 'Internal Server Error',
-        details: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-      },
-      timestamp: new Date().toISOString(),
-    };
-    
-    res.status(statusCode).json(response);
   });
 
   return app;

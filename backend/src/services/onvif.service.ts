@@ -1120,7 +1120,7 @@ export class ONVIFService extends EventEmitter {
         try {
           // Decrypt password if encrypted
           const password = camera.password_encrypted 
-            ? await this.encryptionService.decrypt(camera.password_encrypted) 
+            ? await this.encryptionService.decryptText(camera.password_encrypted) 
             : '';
             
           // Create ONVIF client
@@ -1166,7 +1166,7 @@ export class ONVIFService extends EventEmitter {
           // Add authentication to RTSP URL if credentials are available
           if (camera.username) {
             const password = camera.password_encrypted 
-              ? await this.encryptionService.decrypt(camera.password_encrypted) 
+              ? await this.encryptionService.decryptText(camera.password_encrypted) 
               : '';
               
             rtspUrl = rtspUrl.replace(
