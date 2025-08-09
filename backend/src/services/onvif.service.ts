@@ -18,7 +18,7 @@ import type {
   AuthType,
   VideoCodec,
   HeartbeatResult
-} from '../../../shared/types/onvif';
+} from '@shared/types/onvif';
 
 // Re-export types for backward compatibility
 export type { 
@@ -33,7 +33,7 @@ export type {
   AuthType,
   VideoCodec,
   HeartbeatResult 
-} from '../../../shared/types/onvif';
+} from '@shared/types/onvif';
 
 type OnvifDevice = onvif.Device;
 
@@ -412,10 +412,7 @@ export class ONVIFService extends EventEmitter {
         // Set timeout for the ffprobe process
         timeout = setTimeout(onTimeout, timeoutMs);
       } catch (error) {
-        this.logger.error('Error in testRTSPConnection', {
-          error: error instanceof Error ? error.message : String(error),
-          rtspUrl
-        });
+        this.logger.error({ message: 'Error in testRTSPConnection', data: { error: error instanceof Error ? error.message : String(error), rtspUrl } });
         cleanup();
         resolve(false);
       }
@@ -483,7 +480,7 @@ export class ONVIFService extends EventEmitter {
     // Check if camera is reachable first
     const isReachable = await this.pingCamera(ip);
     if (!isReachable) {
-      this.logger.warn(`Camera at ${ip} is not reachable`);
+      this.logger.warn({ message: `Camera at ${ip} is not reachable` });
       return [];
     }
 
@@ -523,46 +520,80 @@ export class ONVIFService extends EventEmitter {
   /**
    * Detects camera capabilities
    */
-  private async detectCapabilities(device: onvif.Device, manufacturer?: string): Promise<{
-    hasPTZ: boolean;
-    hasAudio: boolean;
-    hasMotionDetection: boolean;
-    hasNightVision: boolean;
-    hasInfrared: boolean;
-    hasZoom: boolean;
-    hasFocus: boolean;
-    hasIris: boolean;
-    hasPresets: boolean;
-    hasEvents: boolean;
-    hasAnalytics: boolean;
-    resolutions: string[];
-    codecs: string[];
-    maxFrameRate: number;
-    onvifVersion: string;
-    profiles: any[];
-    manufacturerFeatures: Record<string, boolean>;
-  }> {
-    // Define the base capabilities with default values
-    const baseCapabilities = {
-      hasPTZ: false,
-      hasAudio: false,
-      hasMotionDetection: false,
-      hasNightVision: false,
-      hasInfrared: false,
-      hasZoom: false,
-      hasFocus: false,
-      hasIris: false,
-      hasPresets: false,
-      hasEvents: false,
-      hasAnalytics: false,
-      resolutions: ['1920x1080', '1280x720'],
-      codecs: ['H.264'],
-      maxFrameRate: 30,
-      onvifVersion: '1.0',
-      profiles: [] as any[],
-      manufacturerFeatures: {} as Record<string, boolean>
+  private async detectCapabilities(device: onvif.Device, manufacturer?: string): Promise<CameraCapabilities> {
+    // Map the detailed capabilities to the CameraCapabilities interface
+    const mapToCameraCapabilities = (capabilities: {
+      hasPTZ: boolean;
+      hasAudio: boolean;
+      hasMotionDetection: boolean;
+      hasNightVision: boolean;
+      hasInfrared: boolean;
+      hasZoom: boolean;
+      hasFocus: boolean;
+      hasIris: boolean;
+      hasPresets: boolean;
+      hasEvents: boolean;
+      hasAnalytics: boolean;
+      resolutions: string[];
+      codecs: string[];
+      maxFrameRate: number;
+      onvifVersion: string;
+      profiles: any[];
+      manufacturerFeatures: Record<string, boolean>;
+    }): CameraCapabilities => {
+      // Create base capabilities object with required fields
+      const baseCapabilities: CameraCapabilities = {
+        streaming: true, // Assume streaming is always true for ONVIF cameras
+        ptz: capabilities.hasPTZ,
+        audio: capabilities.hasAudio,
+        motionDetection: capabilities.hasMotionDetection,
+        analytics: capabilities.hasAnalytics,
+        nightVision: capabilities.hasNightVision,
+        events: capabilities.hasEvents,
+        snapshots: true, // Most ONVIF cameras support snapshots
+        recording: true, // Assume recording is supported
+        onvifVersion: capabilities.onvifVersion || '1.0',
+        maxFrameRate: capabilities.maxFrameRate || 30
+      };
+      
+      // Add manufacturer features as additional properties
+      // Only include boolean values to match the index signature
+      Object.entries(capabilities.manufacturerFeatures || {}).forEach(([key, value]) => {
+        if (typeof value === 'boolean') {
+          baseCapabilities[`manufacturer_${key}`] = value;
+        }
+      });
+      
+      return baseCapabilities;
     };
-
+    // Define the base capabilities with default values that match the CameraCapabilities interface
+    const baseCapabilities: CameraCapabilities = {
+      // Core capabilities - all required by the interface
+      streaming: true, // Assume streaming is supported
+      ptz: false,     // Will be updated based on device capabilities
+      audio: false,   // Will be updated based on device capabilities
+      motionDetection: false, // Will be updated based on device capabilities
+      analytics: false, // Will be updated based on device capabilities
+      nightVision: false, // Will be updated based on device capabilities
+      events: false,   // Will be updated based on device capabilities
+      snapshots: true,  // Assume snapshots are supported
+      recording: true,  // Assume recording is supported
+      
+      // Additional capabilities as string/number values
+      onvifVersion: '1.0', // Default version, will be updated
+      maxFrameRate: 30,
+      
+      // Store complex data as JSON strings to avoid type conflicts
+      _resolutions: JSON.stringify(['1920x1080', '1280x720']),
+      _codecs: JSON.stringify(['H.264']),
+      _profiles: '[]',
+      // Manufacturer features as individual boolean properties
+      manufacturer_isHikvision: false,
+      manufacturer_isDahua: false,
+      manufacturer_isAxis: false,
+      manufacturer_isSony: false,
+      manufacturer_isBosch: false,
+    };
 
     try {
       // Get device capabilities
@@ -600,75 +631,122 @@ export class ONVIFService extends EventEmitter {
 
         let ptzStatus: PTZStatus = {};
         try {
-          ptzStatus = await new Promise<PTZStatus>((resolve, reject) => {
-            device.getStatus({ ProfileToken: 'Profile_1' })
-              .then((data: any) => resolve(data || {}))
-              .catch((err: Error) => {
-                this.logger.debug(`PTZ status check failed: ${err.message}`, { error: err });
+          ptzStatus = await new Promise<PTZStatus>(async (resolve, _reject) => {
+            try {
+              // Safely get the first available profile token with a fallback
+              const profileToken = (device as any).profiles?.[0]?.token || 'Profile_1';
+              
+              // Use the ptz service to get the status
+              const ptzService = (device as any).services?.ptz;
+              if (!ptzService) {
                 resolve({});
-              });
+                return;
+              }
+              
+              // Try the node-onvif style with profile token
+              if (typeof ptzService.getStatus === 'function') {
+                try {
+                  // First try with profile token if available
+                  if (profileToken) {
+                    const status = await ptzService.getStatus({ ProfileToken: profileToken });
+                    resolve(status || {});
+                    return;
+                  }
+                  // Fall back to no parameters if profile token not available
+                  const status = await ptzService.getStatus();
+                  resolve(status || {});
+                } catch (statusError) {
+                  this.logger.debug({
+                    level: 'debug',
+                    message: 'Failed to get PTZ status with getStatus',
+                    data: { error: statusError instanceof Error ? statusError.message : String(statusError) }
+                  });
+                  // Continue to try GetStatus as fallback
+                }
+              }
+              
+              // Fall back to ONVIF standard style if available
+              if (typeof ptzService.GetStatus === 'function' && profileToken) {
+                try {
+                  const status = await ptzService.GetStatus({ ProfileToken: profileToken });
+                  resolve((status?.data as PTZStatus) || {});
+                  return;
+                } catch (getStatusError) {
+                  this.logger.debug({
+                    level: 'debug',
+                    message: 'Failed to get PTZ status with GetStatus',
+                    data: { error: getStatusError instanceof Error ? getStatusError.message : String(getStatusError) }
+                  });
+                }
+              } else {
+                resolve({});
+              }
+            } catch (err) {
+              this.logger.debug({ message: 'PTZ status check failed', data: { error: err instanceof Error ? err.message : String(err) } });
+              resolve({});
+            }
           });
         } catch (error) {
-          this.logger.debug('Error getting PTZ status', { error: error instanceof Error ? error.message : String(error) });
+          this.logger.debug({ message: 'Error getting PTZ status', data: { error: error instanceof Error ? error.message : String(error) } });
         }
         
         if (ptzStatus?.position) {
-          baseCapabilities.hasPTZ = true;
+          baseCapabilities.ptz = true;
           const position = ptzStatus.position;
           
           // Check for specific PTZ capabilities
-          baseCapabilities.hasZoom = 'zoom' in position;
-          baseCapabilities.hasFocus = 'focus' in position;
-          baseCapabilities.hasIris = 'iris' in position;
+          baseCapabilities.manufacturer_hasZoom = 'zoom' in position;
+          baseCapabilities.manufacturer_hasFocus = 'focus' in position;
+          baseCapabilities.manufacturer_hasIris = 'iris' in position;
           
           // Check for presets
           try {
-            const presets = await new Promise<any[]>((resolve) => {
-              device.getPresets({ ProfileToken: 'Profile_1' })
-                .then((data: any) => resolve(Array.isArray(data) ? data : []))
-                .catch((err: Error) => {
-                  this.logger.debug('Error getting presets', { error: err.message });
-                  resolve([]);
-                });
+            const presets = await new Promise<any[]>(async (resolve) => {
+              try {
+                // According to node-onvif.d.ts, getPresets takes no arguments
+                const data = await device.getPresets();
+                resolve(Array.isArray(data) ? data : []);
+              } catch (err) {
+                this.logger.debug({ message: 'Error getting presets', data: { error: err instanceof Error ? err.message : String(err) } });
+                resolve([]);
+              }
             });
-            baseCapabilities.hasPresets = Array.isArray(presets) && presets.length > 0;
+            baseCapabilities.manufacturer_hasPresets = Array.isArray(presets) && presets.length > 0;
           } catch (presetError) {
-            this.logger.debug('Presets not supported', {
-              error: presetError instanceof Error ? presetError.message : String(presetError)
-            });
+            this.logger.debug({ message: 'Presets not supported', data: { error: presetError instanceof Error ? presetError.message : String(presetError) } });
           }
         }
       } catch (error) {
-        this.logger.debug('PTZ capabilities not supported', { 
-          error: error instanceof Error ? error.message : String(error) 
-        });
+        this.logger.debug({ message: 'PTZ capabilities not supported', data: { error: error instanceof Error ? error.message : String(error) } });
       }
 
       // Get profiles and check for audio
       try {
         // Usar la versión con promesas de getProfiles
         const profiles = await device.getProfiles().catch((err: Error) => {
-          this.logger.debug('Error getting profiles', { error: err.message });
+          this.logger.debug({ message: 'Error getting profiles', data: { error: err.message } });
           return [];
         });
         
-        baseCapabilities.profiles = Array.isArray(profiles) ? profiles : [];
+        // Store profiles as a JSON string to avoid type conflicts
+        const profilesArray = Array.isArray(profiles) ? profiles : [];
+        // Store profiles as a JSON string in a property that matches the interface
+        baseCapabilities._profiles = JSON.stringify(profilesArray);
         
-        if (profiles?.[0]) {
-          const profile = profiles[0];
+        if (profilesArray[0]) {
+          const profile = profilesArray[0];
           
           // Check for audio support
           try {
             // Usar la versión con promesas de getAudioSources
             const audioSources = await device.getAudioSources().catch((err: Error) => {
-              this.logger.debug('Error getting audio sources', { error: err.message });
+              this.logger.debug({ message: 'Error getting audio sources', data: { error: err.message } });
               return [];
             });
-            baseCapabilities.hasAudio = Array.isArray(audioSources) && audioSources.length > 0;
+            // Set audio capability based on available audio sources
+            baseCapabilities.audio = Array.isArray(audioSources) && audioSources.length > 0;
           } catch (audioError) {
-            this.logger.debug('Audio sources not available', {
-              error: audioError instanceof Error ? audioError.message : String(audioError)
-            });
+            this.logger.debug({ message: 'Audio sources not available', data: { error: audioError instanceof Error ? audioError.message : String(audioError) } });
           }
           
           // Extract video configuration
@@ -676,38 +754,51 @@ export class ONVIFService extends EventEmitter {
             try {
               // Obtener el token de configuración de video
               const configToken = profile.VideoEncoderConfiguration.$.token;
-              // Usar la versión con promesas de getVideoEncoderConfiguration
-              const videoConfig = await device.getVideoEncoderConfiguration({
-                ConfigurationToken: configToken
-              }).catch((err: Error) => {
-                this.logger.debug('Error getting video encoder configuration', { error: err.message });
-                return null;
-              });
+              // Try both possible method signatures for getVideoEncoderConfiguration
+              let videoConfig = null;
+              try {
+                // First try with the node-onvif style (string parameter)
+                videoConfig = await (device as any).getVideoEncoderConfiguration(configToken);
+              } catch (firstError) {
+                try {
+                  // If that fails, try the standard ONVIF style (options object)
+                  videoConfig = await (device as any).getVideoEncoderConfiguration({ ConfigurationToken: configToken });
+                } catch (secondError) {
+                  this.logger.debug({ 
+                    level: 'debug',
+                    message: 'Error getting video encoder configuration', 
+                    data: { 
+                      firstError: firstError instanceof Error ? firstError.message : String(firstError),
+                      secondError: secondError instanceof Error ? secondError.message : String(secondError)
+                    } 
+                  });
+                  return null;
+                }
+              }
               
               if (videoConfig?.Resolution) {
                 const width = videoConfig.Resolution.Width || 1920;
                 const height = videoConfig.Resolution.Height || 1080;
-                baseCapabilities.resolutions = [`${width}x${height}`];
+                // Store resolutions as a JSON string in a property that matches the interface
+                baseCapabilities._resolutions = JSON.stringify([`${width}x${height}`]);
               }
               
               if (videoConfig?.Encoding) {
-                baseCapabilities.codecs = [videoConfig.Encoding];
+                // Store codecs as a JSON string in a property that matches the interface
+                baseCapabilities._codecs = JSON.stringify([videoConfig.Encoding]);
               }
               
               if (videoConfig?.RateControl?.FrameRateLimit) {
-                baseCapabilities.maxFrameRate = Number(videoConfig.RateControl.FrameRateLimit) || 30;
+                const frameRate = Number(videoConfig.RateControl.FrameRateLimit) || 30;
+                baseCapabilities.maxFrameRate = frameRate;
               }
             } catch (videoError) {
-              this.logger.debug('Failed to get video configuration', {
-                error: videoError instanceof Error ? videoError.message : String(videoError)
-              });
+              this.logger.debug({ message: 'Failed to get video configuration', data: { error: videoError instanceof Error ? videoError.message : String(videoError) } });
             }
           }
         }
       } catch (error) {
-        this.logger.debug('Failed to get profiles', {
-          error: error instanceof Error ? error.message : String(error)
-        });
+        this.logger.debug({ message: 'Failed to get profiles', data: { error: error instanceof Error ? error.message : String(error) } });
       }
 
       // Check for motion detection and analytics
@@ -723,9 +814,7 @@ export class ONVIFService extends EventEmitter {
         const analytics = await new Promise<AnalyticsConfiguration[]>((resolve, reject) => {
           device.getAnalyticsConfigurations((err: Error | null, data?: any) => {
             if (err) {
-              this.logger.debug('Failed to get analytics configurations', { 
-                error: err.message 
-              });
+              this.logger.debug({ message: 'Failed to get analytics configurations', data: { error: err.message } });
               resolve([]);
             } else {
               resolve(Array.isArray(data) ? data : []);
@@ -734,31 +823,67 @@ export class ONVIFService extends EventEmitter {
         });
 
         if (analytics.length > 0) {
-          baseCapabilities.hasMotionDetection = analytics.some(
+          baseCapabilities.motionDetection = analytics.some(
             (config) => config?.AnalyticsEngineConfiguration?.MotionRegionDetection !== undefined
           );
-          baseCapabilities.hasAnalytics = true;
+          baseCapabilities.analytics = true;
         }
       } catch (error) {
-        this.logger.debug('Analytics not supported', { 
-          error: error instanceof Error ? error.message : String(error) 
-        });
+        this.logger.debug({ message: 'Analytics not supported', data: { error: error instanceof Error ? error.message : String(error) } });
       }
 
       // Check for events
       try {
         const events = await promisify(device.getEventProperties).call(device);
-        baseCapabilities.hasEvents = !!events;
+        baseCapabilities.events = !!events;
       } catch (error) {
         // Events not supported
       }
 
       // Check for presets
       try {
-        const presets = await promisify(device.getPresets).call(device, { ProfileToken: 'Profile_1' });
-        baseCapabilities.hasPresets = !!(presets && presets.length > 0);
+        // Get profiles to check for presets
+        const profiles = await device.getProfiles();
+        if (Array.isArray(profiles) && profiles.length > 0) {
+          // Try to get the first profile token - handle different response formats
+          let profileToken: string | undefined;
+          
+          // Check for different possible profile token locations in the response
+          if (profiles[0].$ && profiles[0].$.token) {
+            profileToken = profiles[0].$.token;
+          } else if (profiles[0].token) {
+            profileToken = profiles[0].token;
+          } else if (typeof profiles[0] === 'string') {
+            profileToken = profiles[0];
+          }
+          
+          if (profileToken) {
+            try {
+              const presets = await device.getPresets({ ProfileToken: profileToken });
+              baseCapabilities.manufacturer_hasPresets = Array.isArray(presets) && presets.length > 0;
+            } catch (presetError) {
+              // Failed to get presets, but we still have a valid profile
+              baseCapabilities.manufacturer_hasPresets = false;
+              this.logger.debug({
+                level: 'debug',
+                message: 'Failed to get presets',
+                data: { error: presetError instanceof Error ? presetError.message : String(presetError) }
+              });
+            }
+          } else {
+            baseCapabilities.manufacturer_hasPresets = false;
+          }
+        } else {
+          baseCapabilities.manufacturer_hasPresets = false;
+        }
       } catch (error) {
-        // Presets not supported
+        // Presets not supported or error getting profiles
+        baseCapabilities.manufacturer_hasPresets = false;
+        this.logger.debug({ 
+          level: 'debug',
+          message: 'Presets not supported', 
+          data: { error: error instanceof Error ? error.message : String(error) } 
+        });
       }
 
       // Check for night vision and infrared
@@ -783,28 +908,28 @@ export class ONVIFService extends EventEmitter {
           };
         }
 
-        const videoSources = await new Promise<VideoSource[]>((resolve, reject) => {
-          device.getVideoSources((err: Error | null, data: any) => {
-            if (err) {
-              this.logger.debug('Error getting video sources', { error: err.message });
-              resolve([]);
-            } else {
-              resolve(Array.isArray(data) ? data : []);
-            }
-          });
-        });
+        let videoSources: VideoSource[] = [];
+        try {
+          // Use the Promise-based API directly
+          const result = await device.getVideoSources();
+          videoSources = Array.isArray(result) ? result : [];
+        } catch (err) {
+          this.logger.debug({ message: 'Error getting video sources', data: { error: err instanceof Error ? err.message : String(err) } });
+          videoSources = [];
+        }
 
         if (videoSources.length > 0 && videoSources[0].$) {
           const videoSource = videoSources[0].$;
           
           // Usar type assertion para acceder a propiedades específicas del fabricante
-          baseCapabilities.hasNightVision = 'DayNight' in videoSource;
-          baseCapabilities.hasInfrared = 'InfraredCutFilter' in videoSource;
+          baseCapabilities.nightVision = 'DayNight' in videoSource;
+          baseCapabilities.manufacturer_hasInfrared = 'InfraredCutFilter' in videoSource;
           
           // Add manufacturer-specific features
           if (manufacturer) {
             const normalizedManufacturer = manufacturer.toLowerCase();
-            baseCapabilities.manufacturerFeatures = {
+            // Set individual manufacturer feature flags instead of using an object
+            const manufacturerFeatures = {
               isHikvision: normalizedManufacturer.includes('hikvision'),
               isDahua: normalizedManufacturer.includes('dahua'),
               isAxis: normalizedManufacturer.includes('axis'),
@@ -813,22 +938,20 @@ export class ONVIFService extends EventEmitter {
             };
             
             // Set night vision based on manufacturer if not detected
-            if (!baseCapabilities.hasNightVision) {
-              baseCapabilities.hasNightVision = 
+            if (!baseCapabilities.nightVision) {
+              baseCapabilities.nightVision = 
                 normalizedManufacturer.includes('hikvision') || 
                 normalizedManufacturer.includes('dahua');
             }
           }
         }
       } catch (error) {
-        this.logger.debug('Could not determine night vision/infrared capabilities', { 
-          error: error instanceof Error ? error.message : String(error) 
-        });
+        this.logger.debug({ message: 'Could not determine night vision/infrared capabilities', data: { error: error instanceof Error ? error.message : String(error) } });
       }
       
       return baseCapabilities;
     } catch (error) {
-      logger.error('Error detecting camera capabilities:', error);
+      this.logger.error({ message: 'Error detecting camera capabilities', data: { error: error instanceof Error ? error.message : String(error) } });
       return baseCapabilities;
     }
   }
@@ -917,31 +1040,55 @@ export class ONVIFService extends EventEmitter {
    * Descubre cámaras en la red local usando WS-Discovery
    */
   async discoverCameras(timeoutMs: number = 10000): Promise<DiscoveredCamera[]> {
-    logger.info('Iniciando descubrimiento de cámaras', { timeoutMs });
+    this.logger.info({ message: 'Iniciando descubrimiento de cámaras', data: { timeoutMs } });
     this.discoveryCache.clear();
 
     try {
-      // Usar promisify para convertir el callback a promesa
-      const discoverDevices = promisify(this.onvifManager.Discover.on('device', () => {}));
-      
-      // Configurar timeout
-      const discoveryPromise = new Promise<onvif.Device[]>((resolve) => {
-        const devices: onvif.Device[] = [];
-        const discover = this.onvifManager.Discover;
+      // Usar una promesa para manejar la detección de dispositivos
+      const devices = await new Promise<onvif.Device[]>((resolve) => {
+        const discoveredDevices: onvif.Device[] = [];
+        const discovery = this.onvifManager.Discover;
         
-        discover.on('device', (device: onvif.Device) => {
-          devices.push(device);
-        });
+        // Manejador para cuando se descubre un dispositivo
+        const onDevice = (device: onvif.Device) => {
+          discoveredDevices.push(device);
+        };
         
-        // Forzar finalización después del timeout
-        setTimeout(() => {
-          discover.socket.close();
-          resolve(devices);
+        // Configurar el manejador de eventos
+        discovery.on('device', onDevice);
+        
+        // Iniciar la búsqueda
+        discovery.start();
+        
+        // Configurar el timeout
+        // Store the timeout so we can clear it if needed
+        const discoveryTimeout = setTimeout(async () => {
+          try {
+            // For the Discover class, we just need to call stop()
+            // The event listener will be automatically cleaned up when the instance is garbage collected
+            discovery.stop();
+            
+            // Close the socket if available
+            if ('socket' in discovery && typeof (discovery as any).socket?.close === 'function') {
+              (discovery as any).socket.close();
+            }
+            
+            resolve(discoveredDevices);
+          } catch (error) {
+            this.logger.error({ message: 'Error during discovery cleanup', data: { error: error instanceof Error ? error.message : String(error) } });
+            resolve(discoveredDevices); // Still resolve with what we have
+          }
         }, timeoutMs);
+        
+        // Add error handling for the discovery process
+        discovery.on('error', (error: Error) => {
+          clearTimeout(discoveryTimeout);
+          this.logger.error({ message: 'Discovery error', data: { error: error.message } });
+          resolve(discoveredDevices); // Resolve with what we have so far
+        });
       });
-
-      // Esperar a que termine el descubrimiento o el timeout
-      const devices = await discoveryPromise;
+      
+      this.logger.debug({ message: `Se encontraron ${devices.length} dispositivos` });
       
       // Procesar dispositivos en paralelo
       const discoveryPromises = devices.map(device => this.processDiscoveredDevice(device));
@@ -954,11 +1101,11 @@ export class ONVIFService extends EventEmitter {
         )
         .map(result => result.value);
       
-      logger.log(`Descubrimiento completado. Se encontraron ${discoveredCameras.length} cámaras válidas`);
+      this.logger.info(`Descubrimiento completado. Se encontraron ${discoveredCameras.length} cámaras válidas`);
       
       return discoveredCameras;
     } catch (error) {
-      logger.error('Error durante el descubrimiento de cámaras:', error);
+      this.logger.error({ message: 'Error durante el descubrimiento de cámaras', data: { error: error instanceof Error ? error.message : String(error) } });
       throw new Error(`Error al descubrir cámaras: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -1000,10 +1147,7 @@ export class ONVIFService extends EventEmitter {
       
       return discoveredCamera;
     } catch (error) {
-      this.logger.warn('Error al procesar dispositivo', { 
-        ip: device.hostname, 
-        error: error instanceof Error ? error.message : String(error) 
-      });
+      this.logger.warn({ message: 'Error al procesar dispositivo', data: { ip: device.hostname, error: error instanceof Error ? error.message : String(error) } });
       return null;
     }
   }
@@ -1086,10 +1230,7 @@ export class ONVIFService extends EventEmitter {
       
       return result;
     } catch (error) {
-      this.logger.warn('Validación de cámara fallida', { 
-        ip, 
-        error: error instanceof Error ? error.message : String(error) 
-      });
+      this.logger.warn({ message: 'Validación de cámara fallida', data: { ip, error: error instanceof Error ? error.message : String(error) } });
       
       if (!result.onvifSupport && !result.rtspSupport) {
         result.error = 'No se pudo conectar a la cámara con las credenciales proporcionadas';
@@ -1127,7 +1268,7 @@ export class ONVIFService extends EventEmitter {
       result.ping = await this.pingCamera(camera.ipAddress);
       
       if (!result.ping) {
-        this.logger.warn('Camera not reachable by ping', { cameraId: camera.id });
+        this.logger.warn({ message: 'Camera not reachable by ping', data: { cameraId: camera.id } });
         result.details.pingError = 'Camera not reachable by ping';
         return result;
       }
@@ -1167,10 +1308,7 @@ export class ONVIFService extends EventEmitter {
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          this.logger.warn('ONVIF connection failed', { 
-            cameraId: camera.id, 
-            error: errorMessage
-          });
+          this.logger.warn({ message: 'ONVIF connection failed', data: { cameraId: camera.id, error: errorMessage } });
           result.details.onvifError = errorMessage;
         }
       }
@@ -1196,7 +1334,7 @@ export class ONVIFService extends EventEmitter {
           result.rtsp = await this.testRTSPConnection(rtspUrl);
           
           if (!result.rtsp) {
-            this.logger.warn('RTSP connection failed', { cameraId: camera.id });
+            this.logger.warn({ message: 'RTSP connection failed', data: { cameraId: camera.id } });
             result.details.rtspError = 'RTSP connection failed';
           } else {
             // Add RTSP URL to details if connection was successful
@@ -1211,10 +1349,7 @@ export class ONVIFService extends EventEmitter {
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          this.logger.warn('RTSP check failed', { 
-            cameraId: camera.id, 
-            error: errorMessage
-          });
+          this.logger.warn({ message: 'RTSP check failed', data: { cameraId: camera.id, error: errorMessage } });
           result.details.rtspError = errorMessage;
         }
       }
@@ -1228,10 +1363,7 @@ export class ONVIFService extends EventEmitter {
       return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      this.logger.error('Error in heartbeat check', { 
-        cameraId: camera.id, 
-        error: errorMessage
-      });
+      this.logger.error({ message: 'Error in heartbeat check', data: { cameraId: camera.id, error: errorMessage } });
       
       result.details.error = errorMessage;
       return result;
@@ -1373,7 +1505,7 @@ export class ONVIFService extends EventEmitter {
       return result;
       
     } catch (error) {
-      this.logger.error(`Failed to get device info: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error({ message: `Failed to get device info: ${error instanceof Error ? error.message : 'Unknown error'}` });
       return defaultResult;
     }
   }
@@ -1390,7 +1522,7 @@ export class ONVIFService extends EventEmitter {
   ): Promise<RTSPUrlInfo[]> {
     try {
       if (!device || !device.hostname) {
-        this.logger.warn('Invalid device or missing hostname');
+        this.logger.warn({ message: 'Invalid device or missing hostname' });
         return [];
       }
 
@@ -1451,8 +1583,6 @@ export class ONVIFService extends EventEmitter {
   /**
    * Tests an RTSP URL and adds it to the list if it's reachable
    * @param rtspUrls Array of RTSP URL information
-   * @param hostname Camera hostname or IP address
-   * @param path RTSP path to test
    * @param source Source of the RTSP URL ('auto-detected', 'manufacturer', 'common', or 'user-provided')
    * @param streamType Optional explicit stream type ('main', 'sub', 'mobile')
    */
@@ -1460,7 +1590,7 @@ export class ONVIFService extends EventEmitter {
     rtspUrls: RTSPUrlInfo[],
     hostname: string,
     path: string,
-    source: RTSPUrlInfo['source'] | 'main' | 'sub' | 'mobile',
+    source: RTSPUrlInfo['source'],
     streamType?: RTSPUrlInfo['streamType']
   ): Promise<void> {
     if (!hostname) {

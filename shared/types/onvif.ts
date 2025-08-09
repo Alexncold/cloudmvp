@@ -113,6 +113,8 @@ export interface RTSPUrlInfo {
     /** Any additional vendor-specific properties */
     [key: string]: any;
   };
+  /** Error message if the URL test failed */
+  error?: string;
 }
 
 /**
