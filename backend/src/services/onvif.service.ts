@@ -601,14 +601,12 @@ export class ONVIFService extends EventEmitter {
         let ptzStatus: PTZStatus = {};
         try {
           ptzStatus = await new Promise<PTZStatus>((resolve, reject) => {
-            device.getStatus({ ProfileToken: 'Profile_1' }, (err: Error | null, data?: any) => {
-              if (err) {
+            device.getStatus({ ProfileToken: 'Profile_1' })
+              .then((data: any) => resolve(data || {}))
+              .catch((err: Error) => {
                 this.logger.debug(`PTZ status check failed: ${err.message}`, { error: err });
                 resolve({});
-              } else {
-                resolve(data || {});
-              }
-            });
+              });
           });
         } catch (error) {
           this.logger.debug('Error getting PTZ status', { error: error instanceof Error ? error.message : String(error) });
@@ -626,14 +624,12 @@ export class ONVIFService extends EventEmitter {
           // Check for presets
           try {
             const presets = await new Promise<any[]>((resolve) => {
-              device.getPresets({ ProfileToken: 'Profile_1' }, (err: Error | null, data: any) => {
-                if (err) {
+              device.getPresets({ ProfileToken: 'Profile_1' })
+                .then((data: any) => resolve(Array.isArray(data) ? data : []))
+                .catch((err: Error) => {
                   this.logger.debug('Error getting presets', { error: err.message });
                   resolve([]);
-                } else {
-                  resolve(Array.isArray(data) ? data : []);
-                }
-              });
+                });
             });
             baseCapabilities.hasPresets = Array.isArray(presets) && presets.length > 0;
           } catch (presetError) {
@@ -650,11 +646,10 @@ export class ONVIFService extends EventEmitter {
 
       // Get profiles and check for audio
       try {
-        const profiles = await new Promise<any[]>((resolve, reject) => {
-          device.getProfiles((err, data) => {
-            if (err) reject(err);
-            else resolve(data);
-          });
+        // Usar la versión con promesas de getProfiles
+        const profiles = await device.getProfiles().catch((err: Error) => {
+          this.logger.debug('Error getting profiles', { error: err.message });
+          return [];
         });
         
         baseCapabilities.profiles = Array.isArray(profiles) ? profiles : [];
@@ -664,11 +659,10 @@ export class ONVIFService extends EventEmitter {
           
           // Check for audio support
           try {
-            const audioSources = await new Promise<any[]>((resolve, reject) => {
-              device.getAudioSources((err, data) => {
-                if (err) reject(err);
-                else resolve(data);
-              });
+            // Usar la versión con promesas de getAudioSources
+            const audioSources = await device.getAudioSources().catch((err: Error) => {
+              this.logger.debug('Error getting audio sources', { error: err.message });
+              return [];
             });
             baseCapabilities.hasAudio = Array.isArray(audioSources) && audioSources.length > 0;
           } catch (audioError) {
@@ -680,13 +674,14 @@ export class ONVIFService extends EventEmitter {
           // Extract video configuration
           if (profile.VideoEncoderConfiguration?.$?.token) {
             try {
-              const videoConfig = await new Promise<any>((resolve, reject) => {
-                device.getVideoEncoderConfiguration({
-                  ConfigurationToken: profile.VideoEncoderConfiguration.$.token
-                }, (err, data) => {
-                  if (err) reject(err);
-                  else resolve(data);
-                });
+              // Obtener el token de configuración de video
+              const configToken = profile.VideoEncoderConfiguration.$.token;
+              // Usar la versión con promesas de getVideoEncoderConfiguration
+              const videoConfig = await device.getVideoEncoderConfiguration({
+                ConfigurationToken: configToken
+              }).catch((err: Error) => {
+                this.logger.debug('Error getting video encoder configuration', { error: err.message });
+                return null;
               });
               
               if (videoConfig?.Resolution) {
@@ -1037,11 +1032,14 @@ export class ONVIFService extends EventEmitter {
 
     try {
       // Probar conexión ONVIF
-      const device = new this.onvifManager.OnvifDevice({
+      const device = new onvif.Device({
         xaddr: `http://${ip}:${port}/onvif/device_service`,
         user: username,
         pass: password
       });
+      
+      // Inicializar el dispositivo
+      await device.init();
       
       const deviceInfo = await this.getDeviceInfo(device);
       result.onvifSupport = true;
@@ -1061,11 +1059,30 @@ export class ONVIFService extends EventEmitter {
       }
       
       result.valid = result.onvifSupport || result.rtspSupport;
+      // Configurar URLs RTSP para cálculo de confianza
+      const rtspUrls: RTSPUrlInfo[] = [];
+      if (result.rtspSupport) {
+        rtspUrls.push({
+          url: result.detectedRtspUrl,
+          streamType: 'main',
+          resolution: 'auto-detect',
+          confidence: 1,
+          tested: true,
+          source: 'user-provided' as const
+        });
+      }
+      
+      // Calcular confianza basada en URLs RTSP y credenciales
       result.confidence = this.calculateConfidence(
-        result.rtspSupport ? [{ url: result.detectedRtspUrl, streamType: 'main', resolution: 'auto-detect', confidence: 1 }] : [],
-        result.valid ? [{ username, password, confidence: 1, testedUrl: result.detectedRtspUrl || '', authType: 'digest' }] : [],
+        rtspUrls,
+        rtspUrls, // Usamos las mismas URLs como segundo argumento ya que el tipo lo permite
         result.manufacturer
       );
+      
+      // Si no hay soporte RTSP pero sí ONVIF, establecer una confianza base
+      if (!result.rtspSupport && result.onvifSupport) {
+        result.confidence = Math.max(result.confidence, 0.7); // Mínimo 70% de confianza si hay ONVIF
+      }
       
       return result;
     } catch (error) {
@@ -1120,7 +1137,7 @@ export class ONVIFService extends EventEmitter {
         try {
           // Decrypt password if encrypted
           const password = camera.password_encrypted 
-            ? await this.encryptionService.decryptText(camera.password_encrypted) 
+            ? await EncryptionService.decryptText(camera.password_encrypted) 
             : '';
             
           // Create ONVIF client
@@ -1166,7 +1183,7 @@ export class ONVIFService extends EventEmitter {
           // Add authentication to RTSP URL if credentials are available
           if (camera.username) {
             const password = camera.password_encrypted 
-              ? await this.encryptionService.decryptText(camera.password_encrypted) 
+              ? await EncryptionService.decryptText(camera.password_encrypted) 
               : '';
               
             rtspUrl = rtspUrl.replace(

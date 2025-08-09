@@ -1,0 +1,445 @@
+Only in /home/ubuntu/cloudmvp-main/cloudmvp-main: analysis_report.md
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/app.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/app.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/app.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/app.ts	2025-08-08 14:59:57.363106900 -0400
+@@ -146,20 +146,17 @@
+     // process.exit(1);
+   });
+ 
+-  // Error logging middleware
+-  app.use(errorLogger);
+-
+-  // Error handling middleware
+-  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+-    // If headers were already sent, delegate to the default Express error handler
++  // Manejador de errores centralizado
++  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
++    // Si los encabezados ya fueron enviados, delegar al manejador de errores predeterminado de Express
+     if (res.headersSent) {
+       return next(err);
+     }
+ 
+-    // Log the error with request context
+-    logger.error('Error handler caught:', {
++    // Loggear el error con el contexto de la solicitud
++    logger.error("Error handler caught:", {
+       message: err.message,
+-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
++      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+       path: req.path,
+       method: req.method,
+       params: req.params,
+@@ -167,17 +164,37 @@
+       body: req.body,
+     });
+ 
+-    // Format the error response
+-    const statusCode = (err as any).statusCode || 500;
++    let statusCode = err.statusCode || 500;
++    let errorCode = err.code || "INTERNAL_SERVER_ERROR";
++    let errorMessage = err.message || "Internal Server Error";
++    let errorDetails = process.env.NODE_ENV === "development" ? err.stack : undefined;
++
++    // Manejar errores específicos
++    if (err.name === "JsonWebTokenError" || err.name === "TokenExpiredError") {
++      statusCode = 401;
++      errorCode = "INVALID_TOKEN";
++      errorMessage = "Invalid or expired authentication token";
++      errorDetails = undefined;
++    } else if (err.name === "ValidationError") {
++      statusCode = 400;
++      errorCode = "VALIDATION_ERROR";
++      errorMessage = "Validation failed";
++      errorDetails = err.details || err.message;
++    } else if (err.status === 429) {
++      statusCode = 429;
++      errorCode = "RATE_LIMIT_EXCEEDED";
++      errorMessage = "Too many requests, please try again later";
++      errorDetails = err.retryAfter;
++    } else if (statusCode >= 500) {
++      errorMessage = "An unexpected error occurred";
++    }
++
+     const errorResponse: ApiResponse<null> = {
+       success: false,
+       error: {
+-        code: (err as any).code || 'INTERNAL_SERVER_ERROR',
+-        message: statusCode >= 500 ? 'An unexpected error occurred' : err.message,
+-        details: process.env.NODE_ENV === 'development' ? {
+-          stack: err.stack,
+-          ...(err as any).details,
+-        } : undefined,
++        code: errorCode,
++        message: errorMessage,
++        details: errorDetails,
+       },
+       data: null,
+       timestamp: new Date().toISOString(),
+@@ -186,62 +203,6 @@
+     res.status(statusCode).json(errorResponse);
+   });
+ 
+-  // Handle JWT errors
+-  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+-    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+-      return res.status(401).json({
+-        success: false,
+-        error: {
+-          code: 'INVALID_TOKEN',
+-          message: 'Invalid or expired authentication token',
+-        },
+-        timestamp: new Date().toISOString(),
+-      });
+-    }
+-    
+-    // Handle validation errors
+-    if (err.name === 'ValidationError') {
+-      return res.status(400).json({
+-        success: false,
+-        error: {
+-          code: 'VALIDATION_ERROR',
+-          message: 'Validation failed',
+-          details: err.details || err.message,
+-        },
+-        timestamp: new Date().toISOString(),
+-      });
+-    }
+-    
+-    // Handle rate limit errors
+-    if (err.status === 429) {
+-      return res.status(429).json({
+-        success: false,
+-        error: {
+-          code: 'RATE_LIMIT_EXCEEDED',
+-          message: 'Too many requests, please try again later',
+-          retryAfter: err.retryAfter,
+-        },
+-        timestamp: new Date().toISOString(),
+-      });
+-    }
+-    
+-    // Default error response
+-    const statusCode = err.statusCode || 500;
+-    const response: ApiResponse = {
+-      success: false,
+-      error: {
+-        code: err.code || 'INTERNAL_SERVER_ERROR',
+-        message: process.env.NODE_ENV === 'production' 
+-          ? 'An unexpected error occurred' 
+-          : err.message || 'Internal Server Error',
+-        details: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+-      },
+-      timestamp: new Date().toISOString(),
+-    };
+-    
+-    res.status(statusCode).json(response);
+-  });
+-
+   return app;
+ };
+ 
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/cameras.controller.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/cameras.controller.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/cameras.controller.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/cameras.controller.ts	2025-08-08 14:59:40.715106845 -0400
+@@ -167,22 +167,22 @@
+           lastSeen: new Date(),
+           userId: req.user.id,
+           rtspUrls: {
+-            create: rtspUrls.map((url: string) => ({
+-              url,
++            create: validation.rtspUrls?.map(urlInfo => ({
++              url: urlInfo.url,
+               isActive: true,
+-              streamType: url.includes('sub') ? 'sub' : 'main',
+-              resolution: '1920x1080', // Se actualizará con información real
++              streamType: urlInfo.streamType,
++              resolution: urlInfo.resolution || 'unknown',
+               userId: req.user.id
+-            }))
++            })) || []
+           },
+           capabilities: {
+             create: {
+-              hasPTZ: validation.capabilities?.ptzSupport || false,
+-              hasAudio: validation.capabilities?.audioSupport || false,
+-              hasNightVision: validation.capabilities?.nightVision || false,
+-              hasMotionDetection: validation.capabilities?.motionDetection || false,
+-              resolutions: validation.capabilities?.resolutions || ['1920x1080'],
+-              codecs: validation.capabilities?.codecs || ['H.264'],
++              hasPTZ: validation.capabilities?.hasPTZ || false,
++              hasAudio: validation.capabilities?.hasAudio || false,
++              hasNightVision: validation.capabilities?.hasNightVision || false,
++              hasMotionDetection: validation.capabilities?.hasMotionDetection || false,
++              resolutions: validation.capabilities?.resolutions || [],
++              codecs: validation.capabilities?.codecs || [],
+               onvifVersion: validation.capabilities?.onvifVersion || '1.0',
+               userId: req.user.id
+             }
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/discoveryController.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/discoveryController.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/discoveryController.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/discoveryController.ts	2025-08-08 14:59:15.655106688 -0400
+@@ -56,31 +56,11 @@
+       logger.error('Error en el cliente Redis:', err);
+     });
+     
+-    // Inicializar el validador de red
+-    this.networkValidator = NetworkValidator.getInstance();
+-    
+-    // Inicializar el worker de descubrimiento
+-    this.worker = new Worker<DiscoveryJobData, DiscoveryJobResult, string>(
+-      'discovery-queue',
+-      `${__dirname}/../workers/discoveryWorker.js`,
+-      {
+-        connection: {
+-          host: process.env.REDIS_HOST || 'localhost',
+-          port: parseInt(process.env.REDIS_PORT || '6379', 10),
+-          password: process.env.REDIS_PASSWORD,
+-          tls: process.env.NODE_ENV === 'production' ? {} : undefined,
+-        },
+-        concurrency: parseInt(process.env.DISCOVERY_CONCURRENCY || '3', 10),
+-        removeOnComplete: { count: 100 },
+-        removeOnFail: { count: 1000 },
+-      }
+-    );
+-    
+-    // Configurar manejadores de eventos del worker
+-    this.setupWorkerHandlers();
+-    
+     // Conectar a Redis al iniciar
+     this.connectRedis();
++
++    // Inicializar el validador de red
++    this.networkValidator = NetworkValidator.getInstance();
+   }
+   
+   // Obtener la instancia única del controlador (Singleton)
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/system.controller.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/system.controller.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/controllers/system.controller.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/controllers/system.controller.ts	2025-08-08 14:59:46.879106863 -0400
+@@ -1,6 +1,6 @@
+ import { Request, Response } from 'express';
+ import { logger } from '../utils/logger';
+-import { db } from '../database/db';
++import { db } from '../db';
+ import { StorageService } from '../services/storage.service';
+ 
+ class SystemController {
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/middleware/auth.middleware.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/middleware/auth.middleware.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/middleware/auth.middleware.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/middleware/auth.middleware.ts	2025-08-08 15:00:24.515107000 -0400
+@@ -26,54 +26,7 @@
+   secret: string
+ ) => Promise<TokenPayload>;
+ 
+-/**
+- * Rate limiting store (in-memory for now, consider Redis for production)
+- */
+-const rateLimits = new Map<string, { count: number; resetTime: number }>();
+ 
+-/**
+- * Check if a request should be rate limited
+- * @param key Rate limit key (e.g., 'login:user@example.com' or 'ip:1.2.3.4')
+- * @param limit Maximum number of requests allowed in the window
+- * @param windowMs Time window in milliseconds
+- * @returns Object with rate limit info
+- */
+-const checkRateLimit = (
+-  key: string,
+-  limit: number,
+-  windowMs: number
+-): { allowed: boolean; remaining: number; resetTime: number } => {
+-  const now = Date.now();
+-  const rateLimit = rateLimits.get(key);
+-
+-  // Initialize or reset rate limit window
+-  if (!rateLimit || now > rateLimit.resetTime) {
+-    rateLimits.set(key, {
+-      count: 1,
+-      resetTime: now + windowMs,
+-    });
+-    return { allowed: true, remaining: limit - 1, resetTime: now + windowMs };
+-  }
+-
+-  // Check if rate limit exceeded
+-  if (rateLimit.count >= limit) {
+-    return { 
+-      allowed: false, 
+-      remaining: 0, 
+-      resetTime: rateLimit.resetTime 
+-    };
+-  }
+-
+-  // Increment request count
+-  rateLimit.count++;
+-  rateLimits.set(key, rateLimit);
+-
+-  return { 
+-    allowed: true, 
+-    remaining: limit - rateLimit.count, 
+-    resetTime: rateLimit.resetTime 
+-  };
+-};
+ 
+ /**
+  * Authentication middleware with JWT verification and rate limiting
+@@ -136,19 +89,7 @@
+       });
+     }
+ 
+-    // Apply rate limiting for authenticated requests
+-    const rateLimitKey = `auth:${payload.userId}`;
+-    const rateLimit = checkRateLimit(rateLimitKey, 100, 3600000); // 100 requests/hour
+-    
+-    if (!rateLimit.allowed) {
+-      res.setHeader('Retry-After', Math.ceil((rateLimit.resetTime - Date.now()) / 1000));
+-      return res.status(429).json({
+-        success: false,
+-        message: 'Too many requests',
+-        code: 'RATE_LIMIT_EXCEEDED',
+-        retryAfter: Math.ceil((rateLimit.resetTime - Date.now()) / 1000)
+-      });
+-    }
++
+ 
+     // Get user from database
+     const user = await AuthService.getUserById(payload.userId);
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/services/auth.service.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/services/auth.service.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/services/auth.service.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/services/auth.service.ts	2025-08-08 15:00:13.375106958 -0400
+@@ -1,6 +1,6 @@
+ import bcrypt from 'bcryptjs';
+ import { v4 as uuidv4 } from 'uuid';
+-import { db } from './database';
++import { db } from './db';
+ import { logger } from '../utils/logger';
+ import { User, AuthTokens } from '../../../shared/types/auth';
+ import { generateToken, verifyToken, TokenType } from '../utils/jwt';
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/services/onvif.service.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/services/onvif.service.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/services/onvif.service.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/services/onvif.service.ts	2025-08-08 14:21:29.187226868 -0400
+@@ -1120,7 +1120,7 @@
+         try {
+           // Decrypt password if encrypted
+           const password = camera.password_encrypted 
+-            ? await this.encryptionService.decrypt(camera.password_encrypted) 
++            ? await EncryptionService.decryptText(camera.password_encrypted) 
+             : '';
+             
+           // Create ONVIF client
+@@ -1164,10 +1164,7 @@
+           let rtspUrl = camera.rtspUrl;
+           
+           // Add authentication to RTSP URL if credentials are available
+-          if (camera.username) {
+-            const password = camera.password_encrypted 
+-              ? await this.encryptionService.decrypt(camera.password_encrypted) 
+-              : '';
++            const password = camera.password_encrypted ? await EncryptionService.decryptText(camera.password_encrypted) : '';
+               
+             rtspUrl = rtspUrl.replace(
+               'rtsp://', 
+@@ -1400,8 +1397,7 @@
+           { path: '/cam/realmonitor?channel=1&subtype=0', type: 'main' }
+         ];
+         
+-        for (const { path, type } of commonPaths) {
+-          await this.testAndAddRTSPUrl(rtspUrls, device.hostname, path, type);
++        for (const { path, type } of commonPaths)           await this.testAndAddRTSPUrl(rtspUrls, device.hostname, path, type as RTSPUrlInfo["source"], this.determineStreamType(path));, this.determineStreamType(path));
+         }
+       }
+       
+@@ -1443,7 +1439,7 @@
+     rtspUrls: RTSPUrlInfo[],
+     hostname: string,
+     path: string,
+-    source: RTSPUrlInfo['source'] | 'main' | 'sub' | 'mobile',
++    source: RTSPUrlInfo["source"] | "main" | "sub" | "mobile",
+     streamType?: RTSPUrlInfo['streamType']
+   ): Promise<void> {
+     if (!hostname) {
+@@ -1451,43 +1447,8 @@
+       return;
+     }
+ 
+-    // Map stream type strings to valid RTSPUrlInfo['source'] values
+-    const streamTypeToSource: Record<string, RTSPUrlInfo['source']> = {
+-      'main': 'manufacturer',
+-      'sub': 'manufacturer',
+-      'mobile': 'manufacturer',
+-      'snapshot': 'manufacturer',
+-      'event': 'manufacturer'
+-    };
+-
+-    // Determine the final stream type (default to 'main' if not specified)
+-    const streamTypes = ['main', 'sub', 'mobile', 'snapshot', 'event'] as const;
+-    const finalStreamType: RTSPUrlInfo['streamType'] = streamType || 
+-      (streamTypes.includes(source as any) ? source as RTSPUrlInfo['streamType'] : 'main');
+-    
+-    // Normalize the source to ensure it's a valid RTSPUrlInfo['source']
+-    const validSources = ['manufacturer', 'common', 'auto-detected', 'user-provided'] as const;
+-    const sourceStr = String(source);
+-    const normalizedSource = validSources.includes(sourceStr as any) 
+-      ? sourceStr as RTSPUrlInfo['source']
+-      : streamTypeToSource[sourceStr] || 'auto-detected';
+-    
+-    // Clean up the path (ensure it starts with /)
+-    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+-    
+-    // Construct the full RTSP URL
+-    const url = `rtsp://${hostname}${cleanPath}`;
+-    
+-    // Check if we've already tested this URL (case-insensitive check)
+-    const existingUrlIndex = rtspUrls.findIndex(u => u.url.toLowerCase() === url.toLowerCase());
+-    if (existingUrlIndex >= 0) {
+-      this.logger.debug(`Skipping already tested URL: ${url}`);
+-      return;
+-    }
+-
+-    try {
+-      // Test the RTSP connection
+-      const isReachable = await this.testRTSPConnection(url);
++    const finalStreamType: RTSPUrlInfo['streamType'] = streamType || 'main';
++    const normalizedSource: RTSPUrlInfo['source'] = source;
+       
+       // Create RTSP URL info with all required properties
+       const rtspUrlInfo: RTSPUrlInfo = {
+diff -u -r /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/workers/discoveryWorker.ts /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/workers/discoveryWorker.ts
+--- /home/ubuntu/cloudmvp-main-original/cloudmvp-main/backend/src/workers/discoveryWorker.ts	2025-08-07 23:58:45.000000000 -0400
++++ /home/ubuntu/cloudmvp-main/cloudmvp-main/backend/src/workers/discoveryWorker.ts	2025-08-08 14:59:28.335106798 -0400
+@@ -19,20 +19,7 @@
+ import { createHash } from 'crypto';
+ 
+ // Configuración de Redis
+-const redis = new Redis({
+-  host: process.env.REDIS_URL?.split('://')[1]?.split(':')[0] || 'localhost',
+-  port: parseInt(process.env.REDIS_URL?.split(':')[2] || '6379'),
+-  password: process.env.REDIS_PASSWORD,
+-  maxRetriesPerRequest: 3,
+-  retryStrategy: (times) => {
+-    const delay = Math.min(times * 1000, 5000);
+-    return delay;
+-  },
+-  reconnectOnError: (err) => {
+-    logger.error('Redis connection error:', err);
+-    return true; // Reintentar la conexión
+-  }
+-});
++
+ 
+ // Configuración del worker
+ const WORKER_CONCURRENCY = parseInt(process.env.MAX_CONCURRENT_SCANS || '3');
+@@ -115,7 +102,12 @@
+         }
+       },
+       {
+-        connection: redis,
++        connection: {
++          host: process.env.REDIS_HOST || 'localhost',
++          port: parseInt(process.env.REDIS_PORT || '6379', 10),
++          password: process.env.REDIS_PASSWORD,
++          tls: process.env.NODE_ENV === 'production' ? {} : undefined,
++        },
+         concurrency: WORKER_CONCURRENCY,
+         removeOnComplete: { count: 100 },
+         removeOnFail: { count: 1000 },
+Only in /home/ubuntu/cloudmvp-main/cloudmvp-main: code_changes.diff

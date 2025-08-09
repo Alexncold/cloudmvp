@@ -61,6 +61,15 @@
 
 ## 📅 Historial de Cambios
 
+### 2025-08-08
+- Corregidos errores de TypeScript en el servicio ONVIF:
+  - Resuelto problema de sintaxis por comentario de bloque sin cerrar
+  - Eliminada implementación duplicada de `performHeartbeat`
+  - Normalizado el manejo de la propiedad `source` en `RTSPUrlInfo`
+  - Mejorado el tipado en `testAndAddRTSPUrl`
+- Actualizados los tipos personalizados para Express
+- Mejorados los helpers de test para una mejor integración con TypeScript
+
 ### 2025-08-06
 - Implementadas mejoras en el servicio ONVIF:
   - Añadido método `getDeviceInfo` para obtener información del dispositivo
@@ -85,6 +94,6 @@
 
 ---
 
-**Última actualización:** 2025-08-06 22:02 -03:00
+**Última actualización:** 2025-08-08 20:39 -03:00
 
 > ℹ️ Actualiza este archivo cada vez que se complete una tarea importante o se tomen decisiones relevantes para el proyecto.

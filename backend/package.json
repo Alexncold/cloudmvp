@@ -70,6 +70,7 @@
     "winston-slack-webhook-transport": "^2.3.6"
   },
   "devDependencies": {
+    "@jest/globals": "^30.0.5",
     "@types/bcrypt": "^6.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",

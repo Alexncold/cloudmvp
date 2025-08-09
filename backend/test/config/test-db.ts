@@ -24,8 +24,34 @@ const testPool = {
 // Function to initialize test database
 async function initializeTestDatabase() {
   try {
-    // Mock the database initialization
-    await mockDb.query('CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL)');
+    // Mock the database initialization with production-like schema
+    await mockDb.query(`
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+      
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT,
+        name TEXT NOT NULL,
+        google_id TEXT UNIQUE,
+        is_verified BOOLEAN DEFAULT FALSE,
+        drive_connected BOOLEAN DEFAULT FALSE,
+        google_refresh_token TEXT,
+        verification_token TEXT,
+        verification_token_expires TIMESTAMP WITH TIME ZONE,
+        reset_token TEXT,
+        reset_token_expires TIMESTAMP WITH TIME ZONE,
+        refresh_token_hash TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        CONSTRAINT password_or_oauth CHECK (
+          (password_hash IS NOT NULL) OR (google_id IS NOT NULL)
+        )
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+      CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+    `);
     logger.info('✅ Test database initialized successfully');
   } catch (error) {
     logger.error('❌ Failed to initialize test database:', error);
