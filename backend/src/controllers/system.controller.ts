@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { logger } from '../utils/logger';
-import { db } from '../database/db';
+import { db } from '../services/database';
 import { StorageService } from '../services/storage.service';
 
 class SystemController {

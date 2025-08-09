@@ -48,6 +48,9 @@ export class CamerasController {
    */
   public getCameraById = async (req: Request, res: Response, next: NextFunction) => {
     try {
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({ message: 'No autorizado' });
+      }
       const { id } = req.params;
       
       const camera = await this.prisma.camera.findUnique({
@@ -74,6 +77,9 @@ export class CamerasController {
    */
   public discoverCameras = async (req: Request, res: Response, next: NextFunction) => {
     try {
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({ message: 'No autorizado' });
+      }
       const { timeout = 5000, scanLocalNetwork = true, specificIps = [] } = req.body;
       
       // Validar parámetros

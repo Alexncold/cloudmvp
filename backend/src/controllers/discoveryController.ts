@@ -2,8 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { validationResult } from 'express-validator';
 import { v4 as uuidv4 } from 'uuid';
 import { Worker } from 'bullmq';
-import { createClient } from 'redis';
-import { promisify } from 'util';
+import { createClient, RedisClientType } from 'redis';
 import { io } from '../config/socket';
 import { DiscoveryJobData, DiscoveryJobResult, DiscoveryStatus, DiscoveryPhase, DiscoveryOptions, DiscoveryDevice } from '../../shared/types/discovery';
 import { NetworkValidator } from '../services/networkValidator';
@@ -27,7 +26,7 @@ type DiscoverySession = {
 // Clase del controlador de descubrimiento
 export class DiscoveryController {
   private static instance: DiscoveryController;
-  private redisClient: ReturnType<typeof createClient>;
+  private redisClient: RedisClientType;
   private networkValidator: NetworkValidator;
   private discoverySessions: Map<string, DiscoverySession> = new Map();
   private worker: Worker<DiscoveryJobData, DiscoveryJobResult, string>;
@@ -281,10 +280,7 @@ export class DiscoveryController {
           JSON.stringify(device)
         ]);
         
-        pipeline.hSet(
-          `${this.SESSION_PREFIX}${session.id}:devices`,
-          deviceEntries
-        );
+        pipeline.hSet(`${this.SESSION_PREFIX}${session.id}:devices`, ...deviceEntries);
         
         // Establecer TTL para el hash de dispositivos
         pipeline.expire(

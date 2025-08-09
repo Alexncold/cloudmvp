@@ -45,6 +45,7 @@ interface LocalUser {
   name: string;
   password_hash: string;
   is_verified: boolean;
+  is_admin: boolean;
   verification_token?: string | null;
   verification_token_expires?: Date | null;
   reset_password_token?: string | null;
